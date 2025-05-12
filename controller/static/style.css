@@ -1,0 +1,177 @@
+/* Global Styles */
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    line-height: 1.6;
+    margin: 0;
+    padding: 20px;
+    background-color: #f5f7fa;
+    color: #2d3748;
+}
+
+h1 {
+    color: #2d3748;
+    text-align: center;
+    margin-bottom: 30px;
+    font-size: 2.5em;
+    border-bottom: 2px solid #e2e8f0;
+    padding-bottom: 10px;
+}
+
+h2 {
+    color: #4a5568;
+    margin-top: 30px;
+    font-size: 1.8em;
+}
+
+h3 {
+    color: #4a5568;
+    margin-top: 20px;
+    font-size: 1.4em;
+}
+
+/* Table Styles */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 20px 0;
+    background-color: white;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+th, td {
+    padding: 12px 15px;
+    text-align: left;
+    border-bottom: 1px solid #e2e8f0;
+}
+
+th {
+    background-color: #f7fafc;
+    font-weight: 600;
+    color: #4a5568;
+}
+
+tr:hover {
+    background-color: #f8fafc;
+}
+
+/* Form Styles */
+form {
+    margin: 15px 0;
+    padding: 15px;
+    background-color: white;
+    border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+input[type="text"],
+input[type="number"] {
+    padding: 8px 12px;
+    margin: 5px;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    font-size: 14px;
+    width: 200px;
+}
+
+input[type="text"]:focus,
+input[type="number"]:focus {
+    outline: none;
+    border-color: #4299e1;
+    box-shadow: 0 0 0 3px rgba(66, 153, 225, 0.1);
+}
+
+/* Button Styles */
+button {
+    background-color: #4299e1;
+    color: white;
+    padding: 8px 16px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    transition: background-color 0.2s;
+}
+
+button:hover {
+    background-color: #3182ce;
+}
+
+/* Status Indicators */
+td:nth-child(4) {
+    font-weight: 500;
+}
+
+td:nth-child(4):contains("Up") {
+    color: #48bb78;
+}
+
+td:nth-child(4):contains("Down") {
+    color: #f56565;
+}
+
+/* Action Buttons Container */
+td:last-child {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+    body {
+        padding: 10px;
+    }
+
+    table {
+        display: block;
+        overflow-x: auto;
+    }
+
+    input[type="text"],
+    input[type="number"] {
+        width: 100%;
+        margin: 5px 0;
+    }
+
+    form {
+        padding: 10px;
+    }
+}
+
+/* Form Layout */
+.form-group {
+    margin-bottom: 15px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 5px;
+    color: #4a5568;
+}
+
+/* Partition Actions */
+.partition-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.partition-actions form {
+    margin: 0;
+    padding: 0;
+    box-shadow: none;
+    background: none;
+}
+
+/* Status Colors */
+.status-up {
+    color: #48bb78;
+    font-weight: 500;
+}
+
+.status-down {
+    color: #f56565;
+    font-weight: 500;
+} 

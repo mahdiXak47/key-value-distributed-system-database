@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Key-Value Store Client</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Key-Value Store Client</h1>
+        
+        <div class="operation-buttons">
+            <button onclick="showForm('set')" class="op-btn">Set</button>
+            <button onclick="showForm('get')" class="op-btn">Get</button>
+            <button onclick="showForm('delete')" class="op-btn">Delete</button>
+        </div>
+
+        <!-- Set Form -->
+        <div id="set-form" class="operation-form" style="display: none;">
+            <h2>Set Key-Value</h2>
+            <form id="setForm" onsubmit="handleSubmit(event, 'set')">
+                <div class="form-group">
+                    <label for="set-key">Key:</label>
+                    <input type="text" id="set-key" name="key" required>
+                </div>
+                <div class="form-group">
+                    <label for="set-value">Value:</label>
+                    <input type="text" id="set-value" name="value" required>
+                </div>
+                <div class="button-group">
+                    <button type="submit">Submit</button>
+                    <button type="button" onclick="retryOperation('set')" class="retry-btn" style="display: none;">Retry</button>
+                </div>
+            </form>
+            <div id="set-result" class="result"></div>
+        </div>
+
+        <!-- Get Form -->
+        <div id="get-form" class="operation-form" style="display: none;">
+            <h2>Get Value</h2>
+            <form id="getForm" onsubmit="handleSubmit(event, 'get')">
+                <div class="form-group">
+                    <label for="get-key">Key:</label>
+                    <input type="text" id="get-key" name="key" required>
+                </div>
+                <div class="button-group">
+                    <button type="submit">Submit</button>
+                    <button type="button" onclick="retryOperation('get')" class="retry-btn" style="display: none;">Retry</button>
+                </div>
+            </form>
+            <div id="get-result" class="result"></div>
+        </div>
+
+        <!-- Delete Form -->
+        <div id="delete-form" class="operation-form" style="display: none;">
+            <h2>Delete Key</h2>
+            <form id="deleteForm" onsubmit="handleSubmit(event, 'delete')">
+                <div class="form-group">
+                    <label for="delete-key">Key:</label>
+                    <input type="text" id="delete-key" name="key" required>
+                </div>
+                <div class="button-group">
+                    <button type="submit">Submit</button>
+                    <button type="button" onclick="retryOperation('delete')" class="retry-btn" style="display: none;">Retry</button>
+                </div>
+            </form>
+            <div id="delete-result" class="result"></div>
+        </div>
+    </div>
+
+    <script>
+        let lastOperation = null;
+        let lastFormData = null;
+
+        function showForm(operation) {
+            // Hide all forms
+            document.querySelectorAll('.operation-form').forEach(form => {
+                form.style.display = 'none';
+            });
+            // Show selected form
+            document.getElementById(`${operation}-form`).style.display = 'block';
+        }
+
+        async function handleSubmit(event, operation) {
+            event.preventDefault();
+            const form = event.target;
+            const formData = new FormData(form);
+            lastOperation = operation;
+            lastFormData = formData;
+
+            try {
+                const response = await fetch(`/${operation}`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+                const resultDiv = document.getElementById(`${operation}-result`);
+                const retryBtn = form.querySelector('.retry-btn');
+
+                if (result.success) {
+                    resultDiv.innerHTML = `<div class="success">Operation successful! ${result.value ? `Value: ${result.value}` : ''}</div>`;
+                    retryBtn.style.display = 'none';
+                } else {
+                    resultDiv.innerHTML = `<div class="error">Error: ${result.error || 'Operation failed'}</div>`;
+                    retryBtn.style.display = 'inline-block';
+                }
+            } catch (error) {
+                const resultDiv = document.getElementById(`${operation}-result`);
+                resultDiv.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+                form.querySelector('.retry-btn').style.display = 'inline-block';
+            }
+        }
+
+        function retryOperation(operation) {
+            if (lastOperation === operation && lastFormData) {
+                const form = document.getElementById(`${operation}Form`);
+                const submitEvent = new Event('submit');
+                form.dispatchEvent(submitEvent);
+            }
+        }
+    </script>
+</body>
+</html> 
