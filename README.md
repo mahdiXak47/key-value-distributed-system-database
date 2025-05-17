@@ -1,4 +1,4 @@
-مس# Distributed Key-Value Store System
+Distributed Key-Value Store System
 
 A distributed key-value store system with load balancing, cluster management, and a modern web interface.
 
