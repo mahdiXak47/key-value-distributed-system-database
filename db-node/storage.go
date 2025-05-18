@@ -191,3 +191,53 @@ func (s *Storage) ApplySnapshot(snapshot *lsm.Snapshot) error {
 
 	return nil
 }
+
+// GarbageCollectLayers removes old immutable layers that are no longer needed
+func (s *Storage) GarbageCollectLayers() {
+	// Keep only the most recent layers from each level
+	for i, level := range s.levels {
+		if len(level.immutableLayers) > maxLevelSize {
+			// Calculate how many layers to keep
+			layersToKeep := maxLevelSize / 2 // Keep half of the maximum size
+
+			// Remove older layers
+			s.levels[i].immutableLayers = level.immutableLayers[len(level.immutableLayers)-layersToKeep:]
+			log.Printf("Garbage collected %d old layers from level %d",
+				len(level.immutableLayers)-layersToKeep, i)
+		}
+	}
+}
+
+// MergeOldLayers combines old immutable layers to free up memory
+func (s *Storage) MergeOldLayers() {
+	for i, level := range s.levels {
+		if len(level.immutableLayers) >= maxLevelSize {
+			// Create a new MemTable for merged data
+			mergedTable := lsm.NewMemTable()
+
+			// Merge older layers (first half)
+			layersToMerge := level.immutableLayers[:len(level.immutableLayers)/2]
+			for _, layer := range layersToMerge {
+				data := layer.GetAll()
+				for key, value := range data {
+					mergedTable.Set(key, value)
+				}
+			}
+
+			// Replace old layers with merged layer
+			s.levels[i].immutableLayers = append(
+				[]*lsm.MemTable{mergedTable},
+				level.immutableLayers[len(level.immutableLayers)/2:]...,
+			)
+
+			log.Printf("Merged %d old layers in level %d", len(layersToMerge), i)
+		}
+	}
+}
+
+// CleanupSnapshot removes a snapshot after it's no longer needed
+func (s *Storage) CleanupSnapshot(snapshot *lsm.Snapshot) {
+	// Clear the snapshot's data
+	snapshot.ImmutableLayers = nil
+	snapshot.WALEntries = nil
+}
