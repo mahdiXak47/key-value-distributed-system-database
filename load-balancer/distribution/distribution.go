@@ -126,3 +126,79 @@ func (hr *HashRing) GetNodeCount() int {
 	}
 	return len(addresses)
 }
+
+// PartitionManager handles key distribution and partition management
+type PartitionManager struct {
+	mu               sync.RWMutex
+	numPartitions    int
+	oldNumPartitions int // For resharding
+	isResharding     bool
+}
+
+// NewPartitionManager creates a new partition manager
+func NewPartitionManager(numPartitions int) *PartitionManager {
+	return &PartitionManager{
+		numPartitions: numPartitions,
+	}
+}
+
+// GetPartition returns the partition number for a given key
+func (pm *PartitionManager) GetPartition(key string) int {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	// Hash the key using SHA-256
+	hash := sha256.Sum256([]byte(key))
+	// Convert first 4 bytes to uint32
+	hashValue := binary.BigEndian.Uint32(hash[:4])
+
+	// During resharding, use both old and new partition counts
+	if pm.isResharding {
+		// Use both old and new partition counts
+		oldPartition := int(hashValue % uint32(pm.oldNumPartitions))
+		newPartition := int(hashValue % uint32(pm.numPartitions))
+		// Return both for migration purposes
+		return (oldPartition << 16) | newPartition
+	}
+
+	// Normal case: just use current partition count
+	return int(hashValue % uint32(pm.numPartitions))
+}
+
+// StartResharding begins the partition resizing process
+func (pm *PartitionManager) StartResharding(newNumPartitions int) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	pm.oldNumPartitions = pm.numPartitions
+	pm.numPartitions = newNumPartitions
+	pm.isResharding = true
+}
+
+// CompleteResharding finishes the partition resizing process
+func (pm *PartitionManager) CompleteResharding() {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	pm.isResharding = false
+	pm.oldNumPartitions = 0
+}
+
+// GetPartitionCount returns the current number of partitions
+func (pm *PartitionManager) GetPartitionCount() int {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.numPartitions
+}
+
+// IsResharding returns whether the system is currently resharding
+func (pm *PartitionManager) IsResharding() bool {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.isResharding
+}
+
+// GetOldAndNewPartitions returns both old and new partition numbers during resharding
+func (pm *PartitionManager) GetOldAndNewPartitions(combinedPartition int) (old, new int) {
+	return (combinedPartition >> 16) & 0xFFFF, combinedPartition & 0xFFFF
+}

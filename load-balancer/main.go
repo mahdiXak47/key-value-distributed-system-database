@@ -28,13 +28,13 @@ type Partition struct {
 }
 
 type LoadBalancer struct {
-	nodes         []*Node
-	partitions    []*Partition
-	current       int
-	mu            sync.RWMutex
-	healthCheck   time.Duration
-	controllerURL string
-	hashRing      *distribution.HashRing
+	nodes            []*Node
+	partitions       []*Partition
+	current          int
+	mu               sync.RWMutex
+	healthCheck      time.Duration
+	controllerURL    string
+	partitionManager *distribution.PartitionManager
 }
 
 type KeyValueRequest struct {
@@ -61,47 +61,11 @@ type ControllerResponse struct {
 
 func NewLoadBalancer(healthCheckInterval time.Duration, controllerURL string, numPartitions int) *LoadBalancer {
 	return &LoadBalancer{
-		nodes:         make([]*Node, 0),
-		partitions:    make([]*Partition, numPartitions),
-		healthCheck:   healthCheckInterval,
-		controllerURL: controllerURL,
-		hashRing:      distribution.NewHashRing(10, numPartitions), // 10 virtual nodes per physical node
-	}
-}
-
-func (lb *LoadBalancer) AddNode(address string) {
-	lb.mu.Lock()
-	defer lb.mu.Unlock()
-
-	// Check if node already exists
-	for _, node := range lb.nodes {
-		if node.Address == address {
-			return
-		}
-	}
-
-	// Add node to the hash ring
-	lb.hashRing.AddNode(address)
-
-	lb.nodes = append(lb.nodes, &Node{
-		Address:     address,
-		Active:      true,
-		LastChecked: time.Now(),
-	})
-}
-
-func (lb *LoadBalancer) RemoveNode(address string) {
-	lb.mu.Lock()
-	defer lb.mu.Unlock()
-
-	// Remove node from the hash ring
-	lb.hashRing.RemoveNode(address)
-
-	for i, node := range lb.nodes {
-		if node.Address == address {
-			lb.nodes = append(lb.nodes[:i], lb.nodes[i+1:]...)
-			break
-		}
+		nodes:            make([]*Node, 0),
+		partitions:       make([]*Partition, numPartitions),
+		healthCheck:      healthCheckInterval,
+		controllerURL:    controllerURL,
+		partitionManager: distribution.NewPartitionManager(numPartitions),
 	}
 }
 
@@ -131,26 +95,7 @@ func (lb *LoadBalancer) startHealthCheck() {
 }
 
 func (lb *LoadBalancer) getPartitionForKey(key string) int {
-	return lb.hashRing.GetPartition(key)
-}
-
-func (lb *LoadBalancer) getNodeForKey(key string) *Node {
-	lb.mu.RLock()
-	defer lb.mu.RUnlock()
-
-	// Get the node address from the hash ring
-	nodeAddress := lb.hashRing.GetNode(key)
-	if nodeAddress == "" {
-		return nil
-	}
-
-	// Find the node in our nodes list
-	for _, node := range lb.nodes {
-		if node.Address == nodeAddress && node.Active {
-			return node
-		}
-	}
-	return nil
+	return lb.partitionManager.GetPartition(key)
 }
 
 func (lb *LoadBalancer) getLeaderForPartition(partitionID int) *Node {
@@ -248,8 +193,19 @@ func (lb *LoadBalancer) forwardRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get the target node using consistent hashing
-	targetNode := lb.getNodeForKey(req.Key)
+	// Get partition for the key
+	partitionID := lb.partitionManager.GetPartition(req.Key)
+
+	// Handle resharding if needed
+	if lb.partitionManager.IsResharding() {
+		oldPartition, _ := lb.partitionManager.GetOldAndNewPartitions(partitionID)
+		// During resharding, we need to handle both old and new partitions
+		// This is a simplified version - in production, you'd need to handle data migration
+		partitionID = oldPartition
+	}
+
+	// Get the leader node for this partition
+	targetNode := lb.getLeaderForPartition(partitionID)
 	if targetNode == nil {
 		// Try to update from controller and retry once
 		if err := lb.updateFromController(); err != nil {
@@ -264,7 +220,7 @@ func (lb *LoadBalancer) forwardRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Retry after update
-		targetNode = lb.getNodeForKey(req.Key)
+		targetNode = lb.getLeaderForPartition(partitionID)
 		if targetNode == nil {
 			response := KeyValueResponse{
 				Success: false,
@@ -274,6 +230,15 @@ func (lb *LoadBalancer) forwardRequest(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			json.NewEncoder(w).Encode(response)
 			return
+		}
+	}
+
+	// For read operations, we can use replicas if configured
+	if r.Method == http.MethodGet {
+		// Try to get a replica first
+		replicaNode := lb.getReplicaForPartition(partitionID)
+		if replicaNode != nil {
+			targetNode = replicaNode
 		}
 	}
 
@@ -312,6 +277,25 @@ func (lb *LoadBalancer) forwardRequest(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
+// Handle partition resizing
+func (lb *LoadBalancer) handlePartitionResize(newNumPartitions int) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+
+	// Start resharding process
+	lb.partitionManager.StartResharding(newNumPartitions)
+
+	// Update partitions array
+	newPartitions := make([]*Partition, newNumPartitions)
+	copy(newPartitions, lb.partitions)
+	lb.partitions = newPartitions
+
+	// In a real implementation, you would:
+	// 1. Start data migration from old partitions to new ones
+	// 2. Update routing tables
+	// 3. Complete resharding when migration is done
+}
+
 func main() {
 	lb := NewLoadBalancer(5*time.Second, "http://localhost:8080", 10) // 10 partitions
 
@@ -332,35 +316,6 @@ func main() {
 	http.HandleFunc("/set", lb.forwardRequest)
 	http.HandleFunc("/get", lb.forwardRequest)
 	http.HandleFunc("/delete", lb.forwardRequest)
-
-	// Handle node management
-	http.HandleFunc("/node/add", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		address := r.FormValue("address")
-		if address != "" {
-			lb.AddNode(address)
-			w.WriteHeader(http.StatusOK)
-		} else {
-			http.Error(w, "Address is required", http.StatusBadRequest)
-		}
-	})
-
-	http.HandleFunc("/node/remove", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		address := r.FormValue("address")
-		if address != "" {
-			lb.RemoveNode(address)
-			w.WriteHeader(http.StatusOK)
-		} else {
-			http.Error(w, "Address is required", http.StatusBadRequest)
-		}
-	})
 
 	log.Println("Starting load balancer on :8081")
 	log.Fatal(http.ListenAndServe(":8081", nil))
