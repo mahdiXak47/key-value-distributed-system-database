@@ -33,3 +33,9 @@ func (mt *MemTable) Delete(key string) {
 	defer mt.mu.Unlock()
 	delete(mt.data, key)
 }
+
+func (mt *MemTable) Size() int {
+	mt.mu.RLock()
+	defer mt.mu.RUnlock()
+	return len(mt.data)
+}

@@ -1,35 +1,63 @@
 package main
 
 import (
-	"sync"
+	"log"
+
+	lsm "github.com/mahdiXak47/key-value-distributed-system-database/db-node/lsm"
 )
 
-type KeyValueStore struct {
-	mu   sync.RWMutex
-	data map[string]string
+const (
+	maxMemTableSize = 1000 // Maximum number of entries in MemTable
+)
+
+type Storage struct {
+	memTable        *lsm.MemTable
+	immutableLayers []*lsm.MemTable
 }
 
-func NewKeyValueStore() *KeyValueStore {
-	return &KeyValueStore{
-		data: make(map[string]string),
+func NewStorage() *Storage {
+	return &Storage{
+		memTable:        lsm.NewMemTable(),
+		immutableLayers: make([]*lsm.MemTable, 0),
 	}
 }
 
-func (store *KeyValueStore) Get(key string) (string, bool) {
-	store.mu.RLock()
-	defer store.mu.RUnlock()
-	value, exists := store.data[key]
-	return value, exists
+func (s *Storage) checkAndRotateMemTable() {
+	if s.memTable.Size() >= maxMemTableSize {
+		// Freeze current MemTable
+		frozenTable := s.memTable
+		s.immutableLayers = append(s.immutableLayers, frozenTable)
+
+		// Create new MemTable for ongoing writes
+		s.memTable = lsm.NewMemTable()
+		log.Println("Rotated MemTable due to size threshold")
+	}
 }
 
-func (store *KeyValueStore) Set(key, value string) {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	store.data[key] = value
+func (s *Storage) Set(key, value string) {
+	s.checkAndRotateMemTable()
+	s.memTable.Set(key, value)
 }
 
-func (store *KeyValueStore) Delete(key string) {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	delete(store.data, key)
+func (s *Storage) Get(key string) (string, bool) {
+	// First check in active MemTable
+	value, exists := s.memTable.Get(key)
+	if exists {
+		return value, true
+	}
+
+	// Then check in immutable layers (from newest to oldest)
+	for i := len(s.immutableLayers) - 1; i >= 0; i-- {
+		value, exists = s.immutableLayers[i].Get(key)
+		if exists {
+			return value, true
+		}
+	}
+
+	return "", false
+}
+
+func (s *Storage) Delete(key string) {
+	s.checkAndRotateMemTable()
+	s.memTable.Delete(key)
 }
