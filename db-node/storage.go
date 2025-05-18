@@ -152,3 +152,42 @@ func (s *Storage) RecoverFromWAL() {
 		}
 	}
 }
+
+// CreateSnapshot creates a new snapshot for replication
+func (s *Storage) CreateSnapshot() *lsm.Snapshot {
+	// Collect all immutable layers from all levels
+	var immutableLayers []*lsm.MemTable
+	for _, level := range s.levels {
+		immutableLayers = append(immutableLayers, level.immutableLayers...)
+	}
+
+	// Get WAL entries since last checkpoint (active MemTable changes)
+	walEntries := s.wal.GetEntriesSinceCheckpoint()
+
+	return lsm.NewSnapshot(immutableLayers, walEntries)
+}
+
+// ApplySnapshot applies a complete snapshot to the storage
+func (s *Storage) ApplySnapshot(snapshot *lsm.Snapshot) error {
+	// Clear existing levels
+	s.levels = make([]*Level, 0)
+
+	// Add all immutable layers to the first level
+	if len(snapshot.ImmutableLayers) > 0 {
+		s.levels = append(s.levels, &Level{
+			immutableLayers: snapshot.ImmutableLayers,
+		})
+	}
+
+	// Apply WAL entries to the current MemTable
+	for _, entry := range snapshot.WALEntries {
+		switch entry.Operation {
+		case "SET":
+			s.memTable.Set(entry.Key, entry.Value)
+		case "DELETE":
+			s.memTable.Delete(entry.Key)
+		}
+	}
+
+	return nil
+}
