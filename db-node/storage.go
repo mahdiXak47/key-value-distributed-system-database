@@ -241,3 +241,50 @@ func (s *Storage) CleanupSnapshot(snapshot *lsm.Snapshot) {
 	snapshot.ImmutableLayers = nil
 	snapshot.WALEntries = nil
 }
+
+// GetSnapshotForReplica creates a snapshot for a new replica
+func (s *Storage) GetSnapshotForReplica() *lsm.Snapshot {
+	// Create snapshot of current state
+	snapshot := s.CreateSnapshot()
+
+	// Add a checkpoint to mark the start of new WAL entries
+	s.wal.AddCheckpoint()
+
+	return snapshot
+}
+
+// GetWALEntriesSince returns WAL entries from a specific checkpoint
+func (s *Storage) GetWALEntriesSince(checkpointIndex int) []lsm.LogEntry {
+	allEntries := s.wal.GetAllEntries()
+	if checkpointIndex < 0 || checkpointIndex >= len(allEntries) {
+		return allEntries
+	}
+	return allEntries[checkpointIndex:]
+}
+
+// ApplyWALEntries applies a range of WAL entries to catch up
+func (s *Storage) ApplyWALEntries(entries []lsm.LogEntry) error {
+	for _, entry := range entries {
+		switch entry.Operation {
+		case "SET":
+			s.memTable.Set(entry.Key, entry.Value)
+		case "DELETE":
+			s.memTable.Delete(entry.Key)
+		case "CHECKPOINT":
+			// Rotate current MemTable to immutable layer
+			s.checkAndRotateMemTable()
+		}
+	}
+	return nil
+}
+
+// GetLastCheckpointIndex returns the index of the last checkpoint in WAL
+func (s *Storage) GetLastCheckpointIndex() int {
+	entries := s.wal.GetAllEntries()
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Operation == "CHECKPOINT" {
+			return i
+		}
+	}
+	return -1
+}
