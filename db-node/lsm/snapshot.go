@@ -21,8 +21,8 @@ func (snapshot *Snapshot) Get(key string) (string, bool) {
 	}
 	// Check WAL entries
 	for _, entry := range snapshot.walEntries {
-		if entry.key == key {
-			return entry.value, true
+		if entry.Key == key {
+			return entry.Value, true
 		}
 	}
 	return "", false

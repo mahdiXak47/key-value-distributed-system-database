@@ -18,17 +18,22 @@ type Level struct {
 type Storage struct {
 	memTable *lsm.MemTable
 	levels   []*Level
+	wal      *lsm.WAL
 }
 
 func NewStorage() *Storage {
 	return &Storage{
 		memTable: lsm.NewMemTable(),
 		levels:   make([]*Level, 0),
+		wal:      lsm.NewWAL(),
 	}
 }
 
 func (s *Storage) checkAndRotateMemTable() {
 	if s.memTable.Size() >= maxMemTableSize {
+		// Add checkpoint to WAL before rotating
+		s.wal.AddCheckpoint()
+
 		// Freeze current MemTable
 		frozenTable := s.memTable
 
@@ -93,6 +98,10 @@ func (s *Storage) checkAndMergeLevels() {
 }
 
 func (s *Storage) Set(key, value string) {
+	// Write to WAL first
+	s.wal.AddEntry("SET", key, value)
+
+	// Then update storage
 	s.checkAndRotateMemTable()
 	s.memTable.Set(key, value)
 }
@@ -119,6 +128,27 @@ func (s *Storage) Get(key string) (string, bool) {
 }
 
 func (s *Storage) Delete(key string) {
+	// Write to WAL first
+	s.wal.AddEntry("DELETE", key, "")
+
+	// Then update storage
 	s.checkAndRotateMemTable()
 	s.memTable.Delete(key)
+}
+
+// RecoverFromWAL replays the WAL entries to recover the storage state
+func (s *Storage) RecoverFromWAL() {
+	entries := s.wal.GetAllEntries()
+	for _, entry := range entries {
+		switch entry.Operation {
+		case "SET":
+			s.memTable.Set(entry.Key, entry.Value)
+		case "DELETE":
+			s.memTable.Delete(entry.Key)
+		case "CHECKPOINT":
+			// When we hit a checkpoint, we know all previous entries
+			// are already in the immutable layers
+			continue
+		}
+	}
 }
