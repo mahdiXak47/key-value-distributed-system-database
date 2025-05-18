@@ -5,33 +5,59 @@ import (
 	"io"
 	"log"
 	"net/http"
+
+	"github.com/mahdiXak47/key-value-distributed-system-database/db-node/storage"
 )
 
-var storage = NewStorage()
+var dbStorage = storage.NewStorage()
 
-func main() {
-	// Initialize storage and other components here
+type HealthStatus struct {
+	Status       string `json:"status"`
+	MemTableSize int    `json:"memTableSize"`
+	Levels       int    `json:"levels"`
+}
 
-	// Set up HTTP handlers
-	http.HandleFunc("/get", handleGet)
-	http.HandleFunc("/set", handleSet)
-	http.HandleFunc("/delete", handleDelete)
-	http.HandleFunc("/health", handleHealth)
+type KeyValueResponse struct {
+	Success bool   `json:"success"`
+	Value   string `json:"value,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
 
-	log.Println("DB Node running on :9001")
-	log.Fatal(http.ListenAndServe(":9001", nil))
+func handleHealth(w http.ResponseWriter, r *http.Request) {
+	memTableSize, levels := dbStorage.GetMetrics()
+	status := HealthStatus{
+		Status:       "OK",
+		MemTableSize: memTableSize,
+		Levels:       levels,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(status)
 }
 
 func handleSet(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		response := KeyValueResponse{
+			Success: false,
+			Error:   "Method not allowed",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 
 	// Read request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "Error reading request body", http.StatusBadRequest)
+		response := KeyValueResponse{
+			Success: false,
+			Error:   "Error reading request body",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 	defer r.Body.Close()
@@ -42,69 +68,189 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 		Value string `json:"value"`
 	}
 	if err := json.Unmarshal(body, &kv); err != nil {
-		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+		response := KeyValueResponse{
+			Success: false,
+			Error:   "Invalid JSON format",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 
 	// Validate input
 	if kv.Key == "" {
-		http.Error(w, "Key cannot be empty", http.StatusBadRequest)
+		response := KeyValueResponse{
+			Success: false,
+			Error:   "Key cannot be empty",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 
 	// Store in Storage
-	storage.Set(kv.Key, kv.Value)
+	dbStorage.Set(kv.Key, kv.Value)
 
 	// Send success response
+	response := KeyValueResponse{
+		Success: true,
+		Value:   kv.Value,
+	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
+	json.NewEncoder(w).Encode(response)
 }
 
 func handleGet(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	if r.Method != http.MethodPost {
+		response := KeyValueResponse{
+			Success: false,
+			Error:   "Method not allowed",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 
-	// Get key from query parameter
-	key := r.URL.Query().Get("key")
-	if key == "" {
-		http.Error(w, "Key is required", http.StatusBadRequest)
+	// Read request body
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		response := KeyValueResponse{
+			Success: false,
+			Error:   "Error reading request body",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+	defer r.Body.Close()
+
+	// Parse JSON request
+	var kv struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(body, &kv); err != nil {
+		response := KeyValueResponse{
+			Success: false,
+			Error:   "Invalid JSON format",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Validate input
+	if kv.Key == "" {
+		response := KeyValueResponse{
+			Success: false,
+			Error:   "Key is required",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 
 	// Get value from storage
-	value, exists := storage.Get(key)
+	value, exists := dbStorage.Get(kv.Key)
 	if !exists {
-		http.Error(w, "Key not found", http.StatusNotFound)
+		response := KeyValueResponse{
+			Success: false,
+			Error:   "Key not found",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 
 	// Send response
+	response := KeyValueResponse{
+		Success: true,
+		Value:   value,
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"key":   key,
-		"value": value,
-	})
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }
 
 func handleDelete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	if r.Method != http.MethodPost {
+		response := KeyValueResponse{
+			Success: false,
+			Error:   "Method not allowed",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 
-	// Get key from query parameter
-	key := r.URL.Query().Get("key")
-	if key == "" {
-		http.Error(w, "Key is required", http.StatusBadRequest)
+	// Read request body
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		response := KeyValueResponse{
+			Success: false,
+			Error:   "Error reading request body",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+	defer r.Body.Close()
+
+	// Parse JSON request
+	var kv struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(body, &kv); err != nil {
+		response := KeyValueResponse{
+			Success: false,
+			Error:   "Invalid JSON format",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Validate input
+	if kv.Key == "" {
+		response := KeyValueResponse{
+			Success: false,
+			Error:   "Key is required",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 
 	// Delete from storage
-	storage.Delete(key)
+	dbStorage.Delete(kv.Key)
 
 	// Send success response
+	response := KeyValueResponse{
+		Success: true,
+	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
+	json.NewEncoder(w).Encode(response)
+}
+
+func main() {
+	// Set up HTTP handlers
+	http.HandleFunc("/get", handleGet)
+	http.HandleFunc("/set", handleSet)
+	http.HandleFunc("/delete", handleDelete)
+	http.HandleFunc("/health", handleHealth)
+
+	log.Println("DB Node running on :9001")
+	log.Fatal(http.ListenAndServe(":9001", nil))
 }

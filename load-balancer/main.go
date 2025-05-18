@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"log"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/mahdiXak47/key-value-distributed-system-database/load-balancer/distribution"
 )
 
 type Node struct {
@@ -33,7 +34,7 @@ type LoadBalancer struct {
 	mu            sync.RWMutex
 	healthCheck   time.Duration
 	controllerURL string
-	numPartitions int
+	hashRing      *distribution.HashRing
 }
 
 type KeyValueRequest struct {
@@ -64,7 +65,7 @@ func NewLoadBalancer(healthCheckInterval time.Duration, controllerURL string, nu
 		partitions:    make([]*Partition, numPartitions),
 		healthCheck:   healthCheckInterval,
 		controllerURL: controllerURL,
-		numPartitions: numPartitions,
+		hashRing:      distribution.NewHashRing(10, numPartitions), // 10 virtual nodes per physical node
 	}
 }
 
@@ -79,6 +80,9 @@ func (lb *LoadBalancer) AddNode(address string) {
 		}
 	}
 
+	// Add node to the hash ring
+	lb.hashRing.AddNode(address)
+
 	lb.nodes = append(lb.nodes, &Node{
 		Address:     address,
 		Active:      true,
@@ -90,32 +94,13 @@ func (lb *LoadBalancer) RemoveNode(address string) {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
 
+	// Remove node from the hash ring
+	lb.hashRing.RemoveNode(address)
+
 	for i, node := range lb.nodes {
 		if node.Address == address {
 			lb.nodes = append(lb.nodes[:i], lb.nodes[i+1:]...)
 			break
-		}
-	}
-}
-
-func (lb *LoadBalancer) getNextNode() *Node {
-	lb.mu.Lock()
-	defer lb.mu.Unlock()
-
-	if len(lb.nodes) == 0 {
-		return nil
-	}
-
-	// Round-robin selection
-	start := lb.current
-	for {
-		node := lb.nodes[lb.current]
-		lb.current = (lb.current + 1) % len(lb.nodes)
-		if node.Active {
-			return node
-		}
-		if lb.current == start {
-			return nil // No active nodes
 		}
 	}
 }
@@ -146,9 +131,26 @@ func (lb *LoadBalancer) startHealthCheck() {
 }
 
 func (lb *LoadBalancer) getPartitionForKey(key string) int {
-	h := fnv.New32a()
-	h.Write([]byte(key))
-	return int(h.Sum32()) % lb.numPartitions
+	return lb.hashRing.GetPartition(key)
+}
+
+func (lb *LoadBalancer) getNodeForKey(key string) *Node {
+	lb.mu.RLock()
+	defer lb.mu.RUnlock()
+
+	// Get the node address from the hash ring
+	nodeAddress := lb.hashRing.GetNode(key)
+	if nodeAddress == "" {
+		return nil
+	}
+
+	// Find the node in our nodes list
+	for _, node := range lb.nodes {
+		if node.Address == nodeAddress && node.Active {
+			return node
+		}
+	}
+	return nil
 }
 
 func (lb *LoadBalancer) getLeaderForPartition(partitionID int) *Node {
@@ -236,43 +238,41 @@ func (lb *LoadBalancer) updateFromController() error {
 func (lb *LoadBalancer) forwardRequest(w http.ResponseWriter, r *http.Request) {
 	var req KeyValueRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		response := KeyValueResponse{
+			Success: false,
+			Error:   "Invalid request body",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 
-	partitionID := lb.getPartitionForKey(req.Key)
-	var targetNode *Node
-
-	// For GET requests, try replicas first, then leader
-	if r.Method == http.MethodGet {
-		targetNode = lb.getReplicaForPartition(partitionID)
-		if targetNode == nil {
-			targetNode = lb.getLeaderForPartition(partitionID)
-		}
-	} else {
-		// For SET and DELETE, use leader
-		targetNode = lb.getLeaderForPartition(partitionID)
-	}
-
+	// Get the target node using consistent hashing
+	targetNode := lb.getNodeForKey(req.Key)
 	if targetNode == nil {
 		// Try to update from controller and retry once
 		if err := lb.updateFromController(); err != nil {
-			http.Error(w, "No available nodes", http.StatusServiceUnavailable)
+			response := KeyValueResponse{
+				Success: false,
+				Error:   "No available nodes",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(response)
 			return
 		}
 
 		// Retry after update
-		if r.Method == http.MethodGet {
-			targetNode = lb.getReplicaForPartition(partitionID)
-			if targetNode == nil {
-				targetNode = lb.getLeaderForPartition(partitionID)
-			}
-		} else {
-			targetNode = lb.getLeaderForPartition(partitionID)
-		}
-
+		targetNode = lb.getNodeForKey(req.Key)
 		if targetNode == nil {
-			http.Error(w, "No available nodes after update", http.StatusServiceUnavailable)
+			response := KeyValueResponse{
+				Success: false,
+				Error:   "No available nodes after update",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(response)
 			return
 		}
 	}
@@ -281,7 +281,13 @@ func (lb *LoadBalancer) forwardRequest(w http.ResponseWriter, r *http.Request) {
 	reqBody, _ := json.Marshal(req)
 	newReq, err := http.NewRequest(r.Method, targetNode.Address+r.URL.Path, bytes.NewBuffer(reqBody))
 	if err != nil {
-		http.Error(w, "Error creating request", http.StatusInternalServerError)
+		response := KeyValueResponse{
+			Success: false,
+			Error:   "Error creating request",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 
@@ -289,18 +295,14 @@ func (lb *LoadBalancer) forwardRequest(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{}
 	resp, err := client.Do(newReq)
 	if err != nil {
-		// If request fails, try to update from controller and retry once
-		if err := lb.updateFromController(); err != nil {
-			http.Error(w, "Error forwarding request", http.StatusInternalServerError)
-			return
+		response := KeyValueResponse{
+			Success: false,
+			Error:   "Error forwarding request",
 		}
-
-		// Retry the request
-		resp, err = client.Do(newReq)
-		if err != nil {
-			http.Error(w, "Error forwarding request after retry", http.StatusInternalServerError)
-			return
-		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(response)
+		return
 	}
 	defer resp.Body.Close()
 

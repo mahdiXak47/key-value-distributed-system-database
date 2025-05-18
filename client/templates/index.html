@@ -87,10 +87,19 @@
             lastOperation = operation;
             lastFormData = formData;
 
+            // Convert FormData to JSON
+            const data = {};
+            formData.forEach((value, key) => {
+                data[key] = value;
+            });
+
             try {
                 const response = await fetch(`/${operation}`, {
                     method: 'POST',
-                    body: formData
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(data)
                 });
 
                 const result = await response.json();

@@ -72,7 +72,10 @@ func retryRequest(method, endpoint string, data KeyValueRequest) (*KeyValueRespo
 			time.Sleep(retryDelay)
 		}
 	}
-	return nil, fmt.Errorf("failed after %d retries: %v", maxRetries, lastErr)
+	return &KeyValueResponse{
+		Success: false,
+		Error:   fmt.Sprintf("Failed after %d retries: %v", maxRetries, lastErr),
+	}, nil
 }
 
 func main() {
@@ -100,12 +103,10 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 	key := r.FormValue("key")
 	value := r.FormValue("value")
 
-	response, err := retryRequest(http.MethodPost, "/set", KeyValueRequest{Key: key, Value: value})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	response, _ := retryRequest(http.MethodPost, "/set", KeyValueRequest{Key: key, Value: value})
+	if response.Success {
+		response.Value = fmt.Sprintf("Successfully set key '%s' with value '%s'", key, value)
 	}
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
@@ -118,12 +119,10 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 
 	key := r.FormValue("key")
 
-	response, err := retryRequest(http.MethodGet, "/get", KeyValueRequest{Key: key})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	response, _ := retryRequest(http.MethodGet, "/get", KeyValueRequest{Key: key})
+	if response.Success {
+		response.Value = fmt.Sprintf("Value for key '%s': %s", key, response.Value)
 	}
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
@@ -136,12 +135,10 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 
 	key := r.FormValue("key")
 
-	response, err := retryRequest(http.MethodDelete, "/delete", KeyValueRequest{Key: key})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	response, _ := retryRequest(http.MethodDelete, "/delete", KeyValueRequest{Key: key})
+	if response.Success {
+		response.Value = fmt.Sprintf("Successfully deleted key '%s'", key)
 	}
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
