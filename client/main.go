@@ -100,13 +100,37 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := r.FormValue("key")
-	value := r.FormValue("value")
-
-	response, _ := retryRequest(http.MethodPost, "/set", KeyValueRequest{Key: key, Value: value})
-	if response.Success {
-		response.Value = fmt.Sprintf("Successfully set key '%s' with value '%s'", key, value)
+	// Parse JSON request
+	var requestData struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
 	}
+
+	if err := json.NewDecoder(r.Body).Decode(&requestData); err != nil {
+		log.Printf("[Client] Error decoding request: %v", err)
+		http.Error(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("[Client] Received set request - Key: %s, Value: %s", requestData.Key, requestData.Value)
+
+	response, err := retryRequest(http.MethodPost, "/set", KeyValueRequest{
+		Key:   requestData.Key,
+		Value: requestData.Value,
+	})
+
+	if err != nil {
+		log.Printf("[Client] Error in retryRequest: %v", err)
+		response = &KeyValueResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Error: %v", err),
+		}
+	}
+
+	if response.Success {
+		response.Value = fmt.Sprintf("Successfully set key '%s' with value '%s'", requestData.Key, requestData.Value)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
@@ -117,11 +141,30 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := r.FormValue("key")
+	// Parse JSON request
+	var requestData struct {
+		Key string `json:"key"`
+	}
 
-	response, _ := retryRequest(http.MethodGet, "/get", KeyValueRequest{Key: key})
+	if err := json.NewDecoder(r.Body).Decode(&requestData); err != nil {
+		log.Printf("[Client] Error decoding request: %v", err)
+		http.Error(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("[Client] Received get request - Key: %s", requestData.Key)
+
+	response, err := retryRequest(http.MethodGet, "/get", KeyValueRequest{Key: requestData.Key})
+	if err != nil {
+		log.Printf("[Client] Error in retryRequest: %v", err)
+		response = &KeyValueResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Error: %v", err),
+		}
+	}
+
 	if response.Success {
-		response.Value = fmt.Sprintf("Value for key '%s': %s", key, response.Value)
+		response.Value = fmt.Sprintf("Value for key '%s': %s", requestData.Key, response.Value)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
@@ -133,11 +176,30 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := r.FormValue("key")
+	// Parse JSON request
+	var requestData struct {
+		Key string `json:"key"`
+	}
 
-	response, _ := retryRequest(http.MethodDelete, "/delete", KeyValueRequest{Key: key})
+	if err := json.NewDecoder(r.Body).Decode(&requestData); err != nil {
+		log.Printf("[Client] Error decoding request: %v", err)
+		http.Error(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("[Client] Received delete request - Key: %s", requestData.Key)
+
+	response, err := retryRequest(http.MethodDelete, "/delete", KeyValueRequest{Key: requestData.Key})
+	if err != nil {
+		log.Printf("[Client] Error in retryRequest: %v", err)
+		response = &KeyValueResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Error: %v", err),
+		}
+	}
+
 	if response.Success {
-		response.Value = fmt.Sprintf("Successfully deleted key '%s'", key)
+		response.Value = fmt.Sprintf("Successfully deleted key '%s'", requestData.Key)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)

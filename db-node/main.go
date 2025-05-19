@@ -5,11 +5,9 @@ import (
 	"io"
 	"log"
 	"net/http"
-
-	"github.com/mahdiXak47/key-value-distributed-system-database/db-node/storage"
 )
 
-var dbStorage = storage.NewStorage()
+var dbStorage = NewStorage()
 
 type HealthStatus struct {
 	Status       string `json:"status"`
@@ -24,11 +22,11 @@ type KeyValueResponse struct {
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
-	memTableSize, levels := dbStorage.GetMetrics()
+	metrics := dbStorage.GetMetrics()
 	status := HealthStatus{
 		Status:       "OK",
-		MemTableSize: memTableSize,
-		Levels:       levels,
+		MemTableSize: metrics["memTableSize"].(int),
+		Levels:       metrics["levels"].(int),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

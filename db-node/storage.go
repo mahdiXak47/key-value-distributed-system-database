@@ -288,3 +288,11 @@ func (s *Storage) GetLastCheckpointIndex() int {
 	}
 	return -1
 }
+
+// GetMetrics returns current storage metrics
+func (s *Storage) GetMetrics() map[string]interface{} {
+	return map[string]interface{}{
+		"memTableSize": s.memTable.Size(),
+		"levels":       len(s.levels),
+	}
+}
