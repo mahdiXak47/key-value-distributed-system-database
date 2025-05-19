@@ -68,8 +68,10 @@ func AddNodeHandler(cl *cluster.Cluster) http.HandlerFunc {
 		r.ParseForm()
 		name := r.FormValue("name")
 		addr := r.FormValue("address")
-		if name != "" && addr != "" {
-			cl.AddNode(name, addr)
+
+		if err := cl.AddNode(name, addr); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	}
@@ -88,7 +90,10 @@ func RemoveNodeHandler(cl *cluster.Cluster) http.HandlerFunc {
 // AddPartitionHandler processes adding a partition (POST /partition/add).
 func AddPartitionHandler(cl *cluster.Cluster) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		cl.AddPartition()
+		if err := cl.AddPartition(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	}
 }

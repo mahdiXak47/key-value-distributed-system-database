@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"fmt"
 	"log"
 	"math/rand"
 	"sync"
@@ -83,9 +84,21 @@ func (c *Cluster) StartHealthChecks(interval time.Duration) {
 	}
 }
 
-func (c *Cluster) AddNode(name, address string) {
+func (c *Cluster) AddNode(name, address string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Validate input
+	if name == "" || address == "" {
+		return fmt.Errorf("name and address are required")
+	}
+
+	// Check if node with same address already exists
+	for _, node := range c.nodes {
+		if node.Address == address {
+			return fmt.Errorf("node with address %s already exists", address)
+		}
+	}
 
 	c.nextNodeID++
 	node := &Node{
@@ -95,6 +108,8 @@ func (c *Cluster) AddNode(name, address string) {
 		Active:  true,
 	}
 	c.nodes[node.ID] = node
+	log.Printf("Added new node: %s (%s) with ID %d", name, address, node.ID)
+	return nil
 }
 
 func (c *Cluster) RemoveNode(id int) {
@@ -122,9 +137,20 @@ func (c *Cluster) RemoveNode(id int) {
 	}
 }
 
-func (c *Cluster) AddPartition() {
+func (c *Cluster) AddPartition() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Check if we have any active nodes available
+	activeNodes := 0
+	for _, node := range c.nodes {
+		if node.Active {
+			activeNodes++
+		}
+	}
+	if activeNodes == 0 {
+		return fmt.Errorf("no active nodes available to create partition")
+	}
 
 	c.nextPartID++
 	part := &Partition{
@@ -132,14 +158,80 @@ func (c *Cluster) AddPartition() {
 		Replicas: []int{},
 	}
 
-	// Assign to first available node as leader
-	for _, node := range c.nodes {
-		part.LeaderID = node.ID
-		part.Replicas = append(part.Replicas, node.ID)
-		break
+	// Find the node with the least number of partitions to be the leader
+	leaderID := c.findOptimalLeader()
+	if leaderID == 0 {
+		return fmt.Errorf("no suitable active leader found")
+	}
+
+	part.LeaderID = leaderID
+	part.Replicas = append(part.Replicas, leaderID)
+
+	// Add one more replica if available
+	if activeNodes > 1 {
+		replicaID := c.findOptimalReplica(leaderID)
+		if replicaID != 0 {
+			part.Replicas = append(part.Replicas, replicaID)
+		}
 	}
 
 	c.partitions[part.ID] = part
+	log.Printf("Created new partition %d with leader node %d", part.ID, leaderID)
+	return nil
+}
+
+// findOptimalLeader returns the ID of the node that should be the leader
+// based on the number of partitions it currently leads
+func (c *Cluster) findOptimalLeader() int {
+	leaderCount := make(map[int]int)
+
+	// Count how many partitions each node leads
+	for _, part := range c.partitions {
+		leaderCount[part.LeaderID]++
+	}
+
+	// Find the active node with the least number of partitions
+	minCount := -1
+	var optimalLeader int
+	for id, node := range c.nodes {
+		if !node.Active {
+			continue
+		}
+		count := leaderCount[id]
+		if minCount == -1 || count < minCount {
+			minCount = count
+			optimalLeader = id
+		}
+	}
+	return optimalLeader
+}
+
+// findOptimalReplica returns the ID of the best node to be a replica
+// that is not the current leader and is active
+func (c *Cluster) findOptimalReplica(leaderID int) int {
+	replicaCount := make(map[int]int)
+
+	// Count how many partitions each node is a replica for
+	for _, part := range c.partitions {
+		for _, replicaID := range part.Replicas {
+			replicaCount[replicaID]++
+		}
+	}
+
+	// Find the active node with the least number of replicas that isn't the leader
+	minCount := -1
+	var optimalReplica int
+	for id, node := range c.nodes {
+		if !node.Active || id == leaderID {
+			continue
+		}
+		count := replicaCount[id]
+		if minCount == -1 || count < minCount {
+			minCount = count
+			optimalReplica = id
+		}
+	}
+	return optimalReplica
 }
 
 func (c *Cluster) RemovePartition(id int) {

@@ -3,67 +3,219 @@
 <head>
     <title>Key-Value Cluster Controller</title>
     <link rel="stylesheet" href="/static/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 </head>
 <body>
-    <h1>Cluster Controller Dashboard</h1>
+    <div class="container">
+        <header>
+            <div class="header-content">
+                <h1><i class="fas fa-database"></i> Cluster Controller Dashboard</h1>
+                <div class="cluster-stats">
+                    <div class="stat-card">
+                        <i class="fas fa-server"></i>
+                        <span class="stat-value">{{len .Nodes}}</span>
+                        <span class="stat-label">Active Nodes</span>
+                    </div>
+                    <div class="stat-card">
+                        <i class="fas fa-layer-group"></i>
+                        <span class="stat-value">{{len .Partitions}}</span>
+                        <span class="stat-label">Partitions</span>
+                    </div>
+                </div>
+            </div>
+        </header>
 
-    <h2>Nodes</h2>
-    <table border="1" cellpadding="5">
-        <tr><th>ID</th><th>Name</th><th>Address</th><th>Status</th><th>Action</th></tr>
-        {{range .Nodes}}
-        <tr>
-            <td>{{.ID}}</td>
-            <td>{{.Name}}</td>
-            <td>{{.Address}}</td>
-            <td>{{if .Active}}Up{{else}}Down{{end}}</td>
-            <td>
-                <form method="POST" action="/node/remove">
-                    <input type="hidden" name="id" value="{{.ID}}">
-                    <button type="submit">Remove</button>
-                </form>
-            </td>
-        </tr>
-        {{end}}
-    </table>
+        <div class="dashboard-grid">
+            <!-- Left Column: Node Management -->
+            <div class="dashboard-column">
+                <div class="card">
+                    <div class="card-header">
+                        <h2><i class="fas fa-server"></i> Nodes</h2>
+                        <button class="btn-icon" onclick="toggleAddNode()">
+                            <i class="fas fa-plus"></i>
+                        </button>
+                    </div>
 
-    <h3>Add Node</h3>
-    <form method="POST" action="/node/add">
-        Name: <input name="name" required>
-        Address: <input name="address" required>
-        <button type="submit">Add Node</button>
-    </form>
+                    <div class="add-node-form" id="addNodeForm" style="display: none;">
+                        <form method="POST" action="/node/add" class="add-form">
+                            <div class="form-group">
+                                <label for="node-name"><i class="fas fa-tag"></i> Name:</label>
+                                <input id="node-name" name="name" required placeholder="Enter node name">
+                            </div>
+                            <div class="form-group">
+                                <label for="node-address"><i class="fas fa-network-wired"></i> Address:</label>
+                                <input id="node-address" name="address" required placeholder="http://localhost:9001">
+                            </div>
+                            <button type="submit" class="btn-primary">
+                                <i class="fas fa-plus"></i> Add Node
+                            </button>
+                        </form>
+                    </div>
 
-    <h2>Partitions</h2>
-    <table border="1" cellpadding="5">
-        <tr><th>ID</th><th>Leader</th><th>Replicas</th><th>Actions</th></tr>
-        {{range .Partitions}}
-        <tr>
-            <td>{{.ID}}</td>
-            <td>{{.LeaderName}}</td>
-            <td>{{range .Replicas}}{{.}} {{end}}</td>
-            <td>
-                <form method="POST" action="/partition/remove">
-                    <input type="hidden" name="id" value="{{.ID}}">
-                    <button type="submit">Remove</button>
-                </form>
-                <form method="POST" action="/partition/change-leader">
-                    <input type="hidden" name="id" value="{{.ID}}">
-                    New Leader ID: <input name="newLeaderID" type="number" required>
-                    <button type="submit">Change Leader</button>
-                </form>
-                <form method="POST" action="/partition/transfer">
-                    <input type="hidden" name="id" value="{{.ID}}">
-                    New Node ID: <input name="newNodeID" type="number" required>
-                    <button type="submit">Transfer</button>
-                </form>
-            </td>
-        </tr>
-        {{end}}
-    </table>
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Name</th>
+                                    <th>Address</th>
+                                    <th>Status</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {{range .Nodes}}
+                                <tr>
+                                    <td><span class="node-id">#{{.ID}}</span></td>
+                                    <td><span class="node-name">{{.Name}}</span></td>
+                                    <td><span class="node-address">{{.Address}}</span></td>
+                                    <td>
+                                        <span class="status-badge {{if .Active}}status-up{{else}}status-down{{end}}">
+                                            <i class="fas {{if .Active}}fa-check-circle{{else}}fa-times-circle{{end}}"></i>
+                                            {{if .Active}}Up{{else}}Down{{end}}
+                                        </span>
+                                        {{if not .Active}}
+                                        <span class="status-warning">
+                                            <i class="fas fa-exclamation-triangle"></i> Node is down
+                                        </span>
+                                        {{end}}
+                                    </td>
+                                    <td>
+                                        <form method="POST" action="/node/remove" class="action-form">
+                                            <input type="hidden" name="id" value="{{.ID}}">
+                                            <button type="submit" class="btn-danger">
+                                                <i class="fas fa-trash"></i>
+                                            </button>
+                                        </form>
+                                    </td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
 
-    <h3>Add Partition</h3>
-    <form method="POST" action="/partition/add">
-        <button type="submit">Add Partition</button>
-    </form>
+            <!-- Right Column: Partition Management -->
+            <div class="dashboard-column">
+                <div class="card">
+                    <div class="card-header">
+                        <h2><i class="fas fa-layer-group"></i> Partitions</h2>
+                        <form method="POST" action="/partition/add" class="add-form">
+                            <button type="submit" class="btn-primary">
+                                <i class="fas fa-plus"></i> Add Partition
+                            </button>
+                        </form>
+                    </div>
+
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Leader</th>
+                                    <th>Replicas</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {{range .Partitions}}
+                                <tr>
+                                    <td><span class="partition-id">#{{.ID}}</span></td>
+                                    <td>
+                                        <span class="leader-badge {{if not .HasActiveLeader}}leader-down{{end}}">
+                                            <i class="fas fa-crown"></i> {{.LeaderName}}
+                                            {{if not .HasActiveLeader}}
+                                            <span class="warning-text">(Leader Down)</span>
+                                            {{end}}
+                                        </span>
+                                    </td>
+                                    <td>
+                                        <div class="replica-list">
+                                            {{range .Replicas}}
+                                            <span class="replica-badge {{if .Active}}replica-up{{else}}replica-down{{end}}">
+                                                {{.Name}}
+                                                {{if not .Active}}
+                                                <i class="fas fa-exclamation-circle"></i>
+                                                {{end}}
+                                            </span>
+                                            {{end}}
+                                        </div>
+                                        {{if not .HasActiveReplicas}}
+                                        <div class="partition-warning">
+                                            <i class="fas fa-exclamation-triangle"></i>
+                                            No active replicas available
+                                        </div>
+                                        {{end}}
+                                    </td>
+                                    <td class="partition-actions">
+                                        <div class="action-buttons">
+                                            <form method="POST" action="/partition/remove" class="action-form">
+                                                <input type="hidden" name="id" value="{{.ID}}">
+                                                <button type="submit" class="btn-danger" title="Remove Partition">
+                                                    <i class="fas fa-trash"></i>
+                                                </button>
+                                            </form>
+                                            <button class="btn-warning" onclick="toggleLeaderForm({{.ID}})" title="Change Leader">
+                                                <i class="fas fa-crown"></i>
+                                            </button>
+                                            <button class="btn-info" onclick="toggleTransferForm({{.ID}})" title="Transfer Partition">
+                                                <i class="fas fa-exchange-alt"></i>
+                                            </button>
+                                        </div>
+                                        
+                                        <div class="action-form-container" id="leaderForm{{.ID}}" style="display: none;">
+                                            <form method="POST" action="/partition/change-leader" class="action-form">
+                                                <input type="hidden" name="id" value="{{.ID}}">
+                                                <div class="form-group">
+                                                    <label for="leader-{{.ID}}">New Leader ID:</label>
+                                                    <input id="leader-{{.ID}}" name="newLeaderID" type="number" required>
+                                                </div>
+                                                <button type="submit" class="btn-warning">
+                                                    <i class="fas fa-crown"></i> Change Leader
+                                                </button>
+                                            </form>
+                                        </div>
+
+                                        <div class="action-form-container" id="transferForm{{.ID}}" style="display: none;">
+                                            <form method="POST" action="/partition/transfer" class="action-form">
+                                                <input type="hidden" name="id" value="{{.ID}}">
+                                                <div class="form-group">
+                                                    <label for="transfer-{{.ID}}">New Node ID:</label>
+                                                    <input id="transfer-{{.ID}}" name="newNodeID" type="number" required>
+                                                </div>
+                                                <button type="submit" class="btn-info">
+                                                    <i class="fas fa-exchange-alt"></i> Transfer
+                                                </button>
+                                            </form>
+                                        </div>
+                                    </td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function toggleAddNode() {
+            const form = document.getElementById('addNodeForm');
+            form.style.display = form.style.display === 'none' ? 'block' : 'none';
+        }
+
+        function toggleLeaderForm(id) {
+            const form = document.getElementById('leaderForm' + id);
+            form.style.display = form.style.display === 'none' ? 'block' : 'none';
+        }
+
+        function toggleTransferForm(id) {
+            const form = document.getElementById('transferForm' + id);
+            form.style.display = form.style.display === 'none' ? 'block' : 'none';
+        }
+    </script>
 </body>
 </html>

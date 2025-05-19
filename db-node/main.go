@@ -6,9 +6,15 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
+
+	"github.com/mahdiXak47/key-value-distributed-system-database/db-node/partition"
 )
 
-var dbStorage = NewStorage()
+var (
+	dbStorage        = NewStorage()
+	partitionManager = partition.NewManager()
+)
 
 type HealthStatus struct {
 	Status       string `json:"status"`

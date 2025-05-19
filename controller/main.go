@@ -13,12 +13,6 @@ import (
 func main() {
 	cl := cluster.NewCluster()
 
-	cl.AddNode("NodeA", "http://localhost:9001")
-	cl.AddNode("NodeB", "http://localhost:9002")
-	cl.AddNode("NodeC", "http://localhost:9003")
-	cl.AddPartition() // will assign to NodeA by default
-	cl.AddPartition()
-
 	go cl.StartHealthChecks(5 * time.Second) // check every 5 seconds
 
 	tmpl := template.Must(template.ParseFiles("template/index.html")) // parsing the html file
