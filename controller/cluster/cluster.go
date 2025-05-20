@@ -268,8 +268,6 @@ func (c *Cluster) AddPartition() error {
 	log.Printf("Cluster: Adding new partition")
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	// Create new partition
 	c.nextPartID++
 	partID := c.nextPartID
@@ -281,6 +279,7 @@ func (c *Cluster) AddPartition() error {
 
 	log.Printf("Cluster: Created new partition with ID: %d", partID)
 	c.partitions[partID] = partition
+	c.mu.Unlock() // Release lock before node assignment
 
 	// Assign partition to nodes
 	if len(c.nodes) > 0 {
@@ -424,7 +423,7 @@ func (c *Cluster) assignPartition(partID int) {
 		log.Printf("Cluster: Notifying replica %s about partition %d", replicaAddr, partID)
 		go func(addr string, info NodePartitionInfo) {
 			if err := c.notifyNode(addr, info); err != nil {
-				log.Printf("Cluster: Error notifying replica %s about partition %d: %v", addr, partID, err)
+				log.Printf("Cluster: Error notifying replica %s about partition %d: %v", addr, info.ID, err)
 			}
 		}(replicaAddr, replicaInfo)
 	}

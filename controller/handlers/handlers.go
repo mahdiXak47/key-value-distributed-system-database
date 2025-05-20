@@ -132,6 +132,7 @@ func IndexHandler(cl *cluster.Cluster, tmpl *template.Template) http.HandlerFunc
 			})
 		}
 
+		log.Printf("IndexHandler: Rendering dashboard with %d nodes and %d partitions.", len(data.Nodes), len(data.Partitions))
 		// Execute the template
 		tmpl.Execute(w, data)
 	}
@@ -141,10 +142,23 @@ func IndexHandler(cl *cluster.Cluster, tmpl *template.Template) http.HandlerFunc
 func AddNodeHandler(cl *cluster.Cluster) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Controller: Received request to add new node")
-		r.ParseForm()
+
+		// Parse form data
+		if err := r.ParseForm(); err != nil {
+			log.Printf("Controller: Error parsing form data: %v", err)
+			http.Error(w, "Error parsing form data", http.StatusBadRequest)
+			return
+		}
+
 		name := r.FormValue("name")
 		addr := r.FormValue("address")
 		log.Printf("Controller: Adding node - Name: %s, Address: %s", name, addr)
+
+		if name == "" || addr == "" {
+			log.Printf("Controller: Invalid input - Name and address are required")
+			http.Error(w, "Name and address are required", http.StatusBadRequest)
+			return
+		}
 
 		if err := cl.AddNode(name, addr); err != nil {
 			log.Printf("Controller: Failed to add node - Error: %v", err)
