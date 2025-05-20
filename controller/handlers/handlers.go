@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/mahdiXak47/key-value-distributed-system-database/controller/cluster"
 )
@@ -194,7 +195,7 @@ func AddPartitionHandler(cl *cluster.Cluster) http.HandlerFunc {
 			return
 		}
 		log.Printf("Controller: Successfully added new partition")
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, "/?message=Partition+added+successfully", http.StatusSeeOther)
 	}
 }
 
@@ -295,6 +296,10 @@ func ClusterStatusHandler(cl *cluster.Cluster) http.HandlerFunc {
 			leaderAddr := ""
 			if leaderNode, ok := nodes[part.LeaderID]; ok {
 				leaderAddr = leaderNode.Address
+				// Ensure leader address has http:// prefix
+				if !strings.HasPrefix(leaderAddr, "http://") && !strings.HasPrefix(leaderAddr, "https://") {
+					leaderAddr = "http://" + leaderAddr
+				}
 				log.Printf("Controller: Partition %d leader: %s", part.ID, leaderAddr)
 				if _, exists := nodeDetailsMap[leaderAddr]; !exists {
 					nodeDetailsMap[leaderAddr] = struct {
@@ -311,18 +316,23 @@ func ClusterStatusHandler(cl *cluster.Cluster) http.HandlerFunc {
 			replicaAddrs := []string{}
 			for _, replicaID := range part.Replicas {
 				if replicaNode, ok := nodes[replicaID]; ok {
-					replicaAddrs = append(replicaAddrs, replicaNode.Address)
-					log.Printf("Controller: Partition %d replica: %s", part.ID, replicaNode.Address)
+					replicaAddr := replicaNode.Address
+					// Ensure replica address has http:// prefix
+					if !strings.HasPrefix(replicaAddr, "http://") && !strings.HasPrefix(replicaAddr, "https://") {
+						replicaAddr = "http://" + replicaAddr
+					}
+					replicaAddrs = append(replicaAddrs, replicaAddr)
+					log.Printf("Controller: Partition %d replica: %s", part.ID, replicaAddr)
 					// Mark this node as part of this partition
-					if _, exists := nodeDetailsMap[replicaNode.Address]; !exists {
-						nodeDetailsMap[replicaNode.Address] = struct {
+					if _, exists := nodeDetailsMap[replicaAddr]; !exists {
+						nodeDetailsMap[replicaAddr] = struct {
 							IsLeader   bool
 							Partitions map[int]struct{}
 						}{Partitions: make(map[int]struct{})}
 					}
-					nodeDetail := nodeDetailsMap[replicaNode.Address]
+					nodeDetail := nodeDetailsMap[replicaAddr]
 					nodeDetail.Partitions[part.ID] = struct{}{}
-					nodeDetailsMap[replicaNode.Address] = nodeDetail
+					nodeDetailsMap[replicaAddr] = nodeDetail
 				}
 			}
 			response.Partitions = append(response.Partitions, struct {
@@ -351,12 +361,18 @@ func ClusterStatusHandler(cl *cluster.Cluster) http.HandlerFunc {
 				pIDs = append(pIDs, pid)
 			}
 
+			// Ensure address has http:// prefix
+			address := node.Address
+			if !strings.HasPrefix(address, "http://") && !strings.HasPrefix(address, "https://") {
+				address = "http://" + address
+			}
+
 			response.Nodes = append(response.Nodes, struct {
 				Address    string `json:"address"`
 				IsLeader   bool   `json:"is_leader"`
 				Partitions []int  `json:"partitions"`
 			}{
-				Address:    node.Address,
+				Address:    address,
 				IsLeader:   nodeSpecificDetails.IsLeader,
 				Partitions: pIDs,
 			})

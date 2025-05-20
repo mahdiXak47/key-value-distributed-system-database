@@ -82,6 +82,8 @@
 
         async function handleSubmit(event, operation) {
             event.preventDefault();
+            console.log(`[Debug] Form submission started for ${operation}`);
+            
             const form = event.target;
             const formData = new FormData(form);
             lastOperation = operation;
@@ -93,21 +95,21 @@
                 data[key] = value;
             });
 
-            console.log(`[Frontend] Sending ${operation} request with data:`, data);
+            console.log(`[Debug] Form data:`, data);
 
             try {
-                console.log(`[Frontend] Making request to /${operation}`);
+                console.log(`[Debug] Making request to /${operation}`);
                 const response = await fetch(`/${operation}`, {
                     method: 'POST',
                     headers: {
-                        'Content-Type': 'application/json',  // Changed to JSON
+                        'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify(data)  // Changed to JSON
+                    body: JSON.stringify(data)
                 });
 
-                console.log(`[Frontend] Response status:`, response.status);
+                console.log(`[Debug] Response status:`, response.status);
                 const result = await response.json();
-                console.log(`[Frontend] Received response for ${operation}:`, result);
+                console.log(`[Debug] Response data:`, result);
                 
                 const resultDiv = document.getElementById(`${operation}-result`);
                 const retryBtn = form.querySelector('.retry-btn');
@@ -115,13 +117,13 @@
                 if (result.success) {
                     resultDiv.innerHTML = `<div class="success">Operation successful! ${result.value ? `Value: ${result.value}` : ''}</div>`;
                     retryBtn.style.display = 'none';
-                    alert('Key-Value pair set successfully!');
+                    showNotification('Operation completed successfully!');
                 } else {
                     resultDiv.innerHTML = `<div class="error">Error: ${result.error || 'Operation failed'}</div>`;
                     retryBtn.style.display = 'inline-block';
                 }
             } catch (error) {
-                console.error(`[Frontend] Error during ${operation}:`, error);
+                console.error(`[Debug] Error during ${operation}:`, error);
                 const resultDiv = document.getElementById(`${operation}-result`);
                 resultDiv.innerHTML = `<div class="error">Error: ${error.message}</div>`;
                 form.querySelector('.retry-btn').style.display = 'inline-block';

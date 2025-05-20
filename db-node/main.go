@@ -34,6 +34,7 @@ type KeyValueResponse struct {
 	Success bool   `json:"success"`
 	Value   string `json:"value,omitempty"`
 	Error   string `json:"error,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 type PartitionInfo struct {
@@ -245,6 +246,7 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 	response := KeyValueResponse{
 		Success: true,
 		Value:   kv.Value,
+		Message: "Key-value pair set successfully",
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

@@ -31,7 +31,7 @@ type Partition struct {
 
 type LoadBalancer struct {
 	nodes            []*Node
-	partitions       []*Partition
+	partitions       map[int]*Partition
 	current          int
 	mu               sync.RWMutex
 	healthCheck      time.Duration
@@ -64,7 +64,7 @@ type ControllerResponse struct {
 func NewLoadBalancer(healthCheckInterval time.Duration, controllerURL string, numPartitions int) *LoadBalancer {
 	return &LoadBalancer{
 		nodes:            make([]*Node, 0),
-		partitions:       make([]*Partition, numPartitions),
+		partitions:       make(map[int]*Partition),
 		healthCheck:      healthCheckInterval,
 		controllerURL:    controllerURL,
 		partitionManager: distribution.NewPartitionManager(numPartitions),
@@ -102,13 +102,8 @@ func (lb *LoadBalancer) getLeaderForPartition(partitionID int) *Node {
 
 	log.Printf("LoadBalancer: Looking up leader for partition %d", partitionID)
 
-	if partitionID < 0 || partitionID >= len(lb.partitions) {
-		log.Printf("LoadBalancer: Invalid partition ID %d (range: 0-%d)", partitionID, len(lb.partitions)-1)
-		return nil
-	}
-
-	partition := lb.partitions[partitionID]
-	if partition == nil {
+	partition, exists := lb.partitions[partitionID]
+	if !exists {
 		log.Printf("LoadBalancer: No partition found for ID %d", partitionID)
 		return nil
 	}
@@ -130,12 +125,8 @@ func (lb *LoadBalancer) getReplicaForPartition(partitionID int) *Node {
 	lb.mu.RLock()
 	defer lb.mu.RUnlock()
 
-	if partitionID < 0 || partitionID >= len(lb.partitions) {
-		return nil
-	}
-
-	partition := lb.partitions[partitionID]
-	if partition == nil || len(partition.Replicas) == 0 {
+	partition, exists := lb.partitions[partitionID]
+	if !exists || len(partition.Replicas) == 0 {
 		return nil
 	}
 
@@ -194,12 +185,11 @@ func (lb *LoadBalancer) updateFromController() error {
 	}
 
 	// Update partitions
-	for i, partition := range controllerResp.Partitions {
-		if i < len(lb.partitions) {
-			log.Printf("LoadBalancer: Updating partition info - ID: %d, Leader: %s, Replicas: %v",
-				partition.ID, partition.Leader, partition.Replicas)
-			lb.partitions[i] = &partition
-		}
+	lb.partitions = make(map[int]*Partition)
+	for _, partition := range controllerResp.Partitions {
+		log.Printf("LoadBalancer: Updating partition info - ID: %d, Leader: %s, Replicas: %v",
+			partition.ID, partition.Leader, partition.Replicas)
+		lb.partitions[partition.ID] = &partition
 	}
 
 	log.Printf("LoadBalancer: Successfully updated cluster state from controller")
@@ -332,10 +322,48 @@ func (lb *LoadBalancer) forwardRequest(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	log.Printf("LoadBalancer: Received response from DB node with status: %d", resp.StatusCode)
-	// Copy response
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	// Read the response body
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("LoadBalancer: Error reading response body: %v", err)
+		http.Error(w, "Error reading response from node", http.StatusInternalServerError)
+		return
+	}
+
+	// Parse the response to get the message
+	var kvResp struct {
+		Success bool   `json:"success"`
+		Value   string `json:"value,omitempty"`
+		Error   string `json:"error,omitempty"`
+		Message string `json:"message,omitempty"`
+	}
+	if err := json.Unmarshal(body, &kvResp); err != nil {
+		log.Printf("LoadBalancer: Error parsing response: %v", err)
+		http.Error(w, "Error parsing response from node", http.StatusInternalServerError)
+		return
+	}
+
+	// Set appropriate status code
+	if !kvResp.Success {
+		w.WriteHeader(http.StatusBadRequest)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+
+	// Add message to response if present
+	if kvResp.Message != "" {
+		// Add message to response
+		response := map[string]interface{}{
+			"success": kvResp.Success,
+			"value":   kvResp.Value,
+			"error":   kvResp.Error,
+			"message": kvResp.Message,
+		}
+		json.NewEncoder(w).Encode(response)
+	} else {
+		// Original response without message
+		w.Write(body)
+	}
 }
 
 // Handle partition resizing
@@ -347,8 +375,10 @@ func (lb *LoadBalancer) handlePartitionResize(newNumPartitions int) {
 	lb.partitionManager.StartResharding(newNumPartitions)
 
 	// Update partitions array
-	newPartitions := make([]*Partition, newNumPartitions)
-	copy(newPartitions, lb.partitions)
+	newPartitions := make(map[int]*Partition)
+	for _, partition := range lb.partitions {
+		newPartitions[partition.ID] = partition
+	}
 	lb.partitions = newPartitions
 
 	// In a real implementation, you would:
