@@ -60,24 +60,6 @@ func makeRequest(method, endpoint string, data KeyValueRequest) (*KeyValueRespon
 	return &response, nil
 }
 
-func retryRequest(method, endpoint string, data KeyValueRequest) (*KeyValueResponse, error) {
-	var lastErr error
-	for i := 0; i < maxRetries; i++ {
-		response, err := makeRequest(method, endpoint, data)
-		if err == nil && response.Success {
-			return response, nil
-		}
-		lastErr = err
-		if i < maxRetries-1 {
-			time.Sleep(retryDelay)
-		}
-	}
-	return &KeyValueResponse{
-		Success: false,
-		Error:   fmt.Sprintf("Failed after %d retries: %v", maxRetries, lastErr),
-	}, nil
-}
-
 func main() {
 	// Start the web server
 	http.HandleFunc("/", handleHome)
@@ -95,7 +77,7 @@ func handleHome(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleSet(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -106,7 +88,8 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 		Value string `json:"value"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&requestData); err != nil {
+	err := json.NewDecoder(r.Body).Decode(&requestData)
+	if err != nil {
 		log.Printf("[Client] Error decoding request: %v", err)
 		http.Error(w, "Invalid request format", http.StatusBadRequest)
 		return
@@ -114,13 +97,14 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[Client] Received set request - Key: %s, Value: %s", requestData.Key, requestData.Value)
 
-	response, err := retryRequest(http.MethodPost, "/set", KeyValueRequest{
+	// Send request to load balancer
+	response, err := makeRequest("POST", "/set", KeyValueRequest{
 		Key:   requestData.Key,
 		Value: requestData.Value,
 	})
 
 	if err != nil {
-		log.Printf("[Client] Error in retryRequest: %v", err)
+		log.Printf("[Client] Error sending request: %v", err)
 		response = &KeyValueResponse{
 			Success: false,
 			Error:   fmt.Sprintf("Error: %v", err),
@@ -136,7 +120,7 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGet(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -154,9 +138,9 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[Client] Received get request - Key: %s", requestData.Key)
 
-	response, err := retryRequest(http.MethodGet, "/get", KeyValueRequest{Key: requestData.Key})
+	response, err := makeRequest("GET", "/get", KeyValueRequest{Key: requestData.Key})
 	if err != nil {
-		log.Printf("[Client] Error in retryRequest: %v", err)
+		log.Printf("[Client] Error sending request: %v", err)
 		response = &KeyValueResponse{
 			Success: false,
 			Error:   fmt.Sprintf("Error: %v", err),
@@ -171,7 +155,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleDelete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -189,9 +173,9 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[Client] Received delete request - Key: %s", requestData.Key)
 
-	response, err := retryRequest(http.MethodDelete, "/delete", KeyValueRequest{Key: requestData.Key})
+	response, err := makeRequest("DELETE", "/delete", KeyValueRequest{Key: requestData.Key})
 	if err != nil {
-		log.Printf("[Client] Error in retryRequest: %v", err)
+		log.Printf("[Client] Error sending request: %v", err)
 		response = &KeyValueResponse{
 			Success: false,
 			Error:   fmt.Sprintf("Error: %v", err),

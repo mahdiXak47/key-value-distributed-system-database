@@ -186,10 +186,16 @@ func (lb *LoadBalancer) updateFromController() error {
 
 	// Update partitions
 	lb.partitions = make(map[int]*Partition)
-	for _, partition := range controllerResp.Partitions {
+	for _, p := range controllerResp.Partitions {
 		log.Printf("LoadBalancer: Updating partition info - ID: %d, Leader: %s, Replicas: %v",
-			partition.ID, partition.Leader, partition.Replicas)
-		lb.partitions[partition.ID] = &partition
+			p.ID, p.Leader, p.Replicas)
+		// Create a new partition to avoid the loop variable issue
+		partition := Partition{
+			ID:       p.ID,
+			Leader:   p.Leader,
+			Replicas: p.Replicas,
+		}
+		lb.partitions[p.ID] = &partition
 	}
 
 	log.Printf("LoadBalancer: Successfully updated cluster state from controller")
