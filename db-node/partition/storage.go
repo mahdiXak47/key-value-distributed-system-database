@@ -6,6 +6,11 @@ import (
 	"github.com/mahdiXak47/key-value-distributed-system-database/db-node/lsm"
 )
 
+const (
+	maxMemTableSize = 1000 // Maximum number of entries in MemTable
+	maxLevelSize    = 5    // Maximum number of immutable layers per level
+)
+
 // Storage represents partition-specific storage
 type Storage struct {
 	partitionID int
@@ -83,7 +88,7 @@ func (s *Storage) Delete(key string) {
 
 // checkAndRotateMemTable checks if the MemTable needs to be rotated
 func (s *Storage) checkAndRotateMemTable() {
-	if s.memTable.Size() >= 1000 { // Configurable threshold
+	if s.memTable.Size() >= maxMemTableSize { // Use constant
 		// Add checkpoint to WAL before rotating
 		s.wal.AddCheckpoint()
 
@@ -110,12 +115,15 @@ func (s *Storage) checkAndRotateMemTable() {
 
 // checkAndMergeLevels checks if levels need to be merged
 func (s *Storage) checkAndMergeLevels() {
+	// No s.mu.Lock() here as this is an internal method called by checkAndRotateMemTable,
+	// which is called by Set/Delete which already hold the lock.
+
 	// Start from level 0
 	for i := 0; i < len(s.levels); i++ {
 		level := s.levels[i]
 
 		// If level is full, merge with next level
-		if len(level.immutableLayers) >= 5 { // Configurable threshold
+		if len(level.immutableLayers) >= maxLevelSize { // Use constant
 			// Create next level if it doesn't exist
 			if i+1 >= len(s.levels) {
 				s.levels = append(s.levels, &Level{
@@ -148,11 +156,14 @@ func (s *Storage) checkAndMergeLevels() {
 }
 
 // GetMetrics returns storage metrics
-func (s *Storage) GetMetrics() (int, int) {
+func (s *Storage) GetMetrics() map[string]interface{} {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return s.memTable.Size(), len(s.levels)
+	return map[string]interface{}{
+		"memTableSize": s.memTable.Size(),
+		"levels":       len(s.levels),
+	}
 }
 
 // CreateSnapshot creates a snapshot of the partition's data
@@ -198,4 +209,173 @@ func (s *Storage) ApplySnapshot(snapshot *lsm.Snapshot) error {
 	}
 
 	return nil
+}
+
+// RecoverFromWAL replays the WAL entries to recover the storage state
+func (s *Storage) RecoverFromWAL() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entries := s.wal.GetAllEntries()
+	for _, entry := range entries {
+		switch entry.Operation {
+		case "SET":
+			// directly set to memtable, rotation will be handled if needed by next regular SET
+			s.memTable.Set(entry.Key, entry.Value)
+		case "DELETE":
+			s.memTable.Delete(entry.Key)
+		case "CHECKPOINT":
+			// Checkpoints are markers, actual data already processed or will be.
+			// For recovery, we process all SET/DELETE ops.
+			// If rotation logic were tied to checkpoints during replay, it would be more complex.
+			// Current checkAndRotate is based on size, which is fine.
+			continue
+		}
+	}
+	// After replaying, it might be good to force a checkAndRotateMemTable
+	// if the memTable became too large, but this is optional.
+	// s.checkAndRotateMemTable()
+}
+
+// GetSnapshotForReplica creates a snapshot for a new replica and adds a WAL checkpoint.
+func (s *Storage) GetSnapshotForReplica() *lsm.Snapshot {
+	// CreateSnapshot needs RLock, AddCheckpoint needs Lock.
+	// To avoid lock escalation issues or holding a lock for too long,
+	// we can unlock RLock before acquiring Lock if CreateSnapshot is purely read-only on s fields.
+	// However, CreateSnapshot already takes s.mu.RLock().
+	// The WAL checkpointing should ideally be atomic with the snapshot perception.
+	// Let's take a full lock for this composite operation.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Create snapshot of current state
+	// Collect all immutable layers from all levels
+	var immutableLayers []*lsm.MemTable
+	for _, level := range s.levels {
+		immutableLayers = append(immutableLayers, level.immutableLayers...)
+	}
+	// Get WAL entries since last checkpoint (active MemTable changes)
+	walEntries := s.wal.GetEntriesSinceCheckpoint()
+	snapshot := lsm.NewSnapshot(immutableLayers, walEntries)
+
+	// Add a checkpoint to mark the start of new WAL entries for the replica
+	s.wal.AddCheckpoint()
+
+	return snapshot
+}
+
+// GetWALEntriesSince returns WAL entries from a specific checkpoint index.
+// Assumes lsm.WAL is concurrency-safe for read operations like GetAllEntries.
+func (s *Storage) GetWALEntriesSince(checkpointIndex int) []lsm.LogEntry {
+	// This method primarily interacts with WAL, assume WAL is thread-safe.
+	// No explicit s.mu lock needed here if it only touches s.wal methods.
+	allEntries := s.wal.GetAllEntries()
+	if checkpointIndex < 0 || checkpointIndex >= len(allEntries) {
+		// Return all entries if checkpointIndex is invalid, or consider error/empty slice
+		return allEntries
+	}
+	return allEntries[checkpointIndex:]
+}
+
+// ApplyWALEntries applies a range of WAL entries to catch up.
+func (s *Storage) ApplyWALEntries(entries []lsm.LogEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, entry := range entries {
+		switch entry.Operation {
+		case "SET":
+			s.memTable.Set(entry.Key, entry.Value)
+		case "DELETE":
+			s.memTable.Delete(entry.Key)
+		case "CHECKPOINT":
+			// If a checkpoint from the leader implies a rotation,
+			// the replica should also rotate.
+			s.checkAndRotateMemTable()
+		}
+	}
+	// It's possible the memtable grew large after applying entries
+	s.checkAndRotateMemTable() // ensure consistency with size limits
+	return nil
+}
+
+// GetLastCheckpointIndex returns the index of the last checkpoint in WAL.
+// Assumes lsm.WAL is concurrency-safe for read operations.
+func (s *Storage) GetLastCheckpointIndex() int {
+	// This method primarily interacts with WAL.
+	entries := s.wal.GetAllEntries()
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Operation == "CHECKPOINT" {
+			return i
+		}
+	}
+	return -1 // No checkpoint found
+}
+
+// GarbageCollectLayers removes old immutable layers that are no longer needed.
+func (s *Storage) GarbageCollectLayers() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Keep only the most recent layers from each level
+	for i, level := range s.levels {
+		if len(level.immutableLayers) > maxLevelSize { // Use constant
+			// Calculate how many layers to keep
+			layersToKeep := maxLevelSize / 2 // Keep half of the maximum size, ensure it's at least 1 if maxLevelSize is small
+			if layersToKeep == 0 && maxLevelSize > 0 {
+				layersToKeep = 1
+			}
+
+			if len(level.immutableLayers) > layersToKeep {
+				s.levels[i].immutableLayers = level.immutableLayers[len(level.immutableLayers)-layersToKeep:]
+			}
+		}
+	}
+}
+
+// MergeOldLayers combines old immutable layers to free up memory and reduce layers.
+func (s *Storage) MergeOldLayers() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, level := range s.levels {
+		// This condition is similar to checkAndMergeLevels, but focuses on merging older parts
+		// Let's refine this: if a level has too many layers, merge the oldest ones.
+		if len(level.immutableLayers) >= maxLevelSize { // Use constant
+			// Create a new MemTable for merged data
+			mergedTable := lsm.NewMemTable()
+
+			// Merge older layers (e.g., first half or those exceeding a threshold)
+			// Example: merge all but the newest maxLevelSize/2 layers
+			numToKeepIdeally := maxLevelSize / 2
+			if numToKeepIdeally == 0 && maxLevelSize > 0 {
+				numToKeepIdeally = 1
+			}
+			if len(level.immutableLayers) > numToKeepIdeally {
+				layersToMergeCount := len(level.immutableLayers) - numToKeepIdeally
+				layersToMerge := level.immutableLayers[:layersToMergeCount]
+				remainingLayers := level.immutableLayers[layersToMergeCount:]
+
+				for _, layer := range layersToMerge {
+					data := layer.GetAll()
+					for key, value := range data {
+						mergedTable.Set(key, value) // Newer entries in later layersToMerge will overwrite older
+					}
+				}
+				// Replace old layers with the merged layer
+				s.levels[i].immutableLayers = append([]*lsm.MemTable{mergedTable}, remainingLayers...)
+			}
+		}
+	}
+}
+
+// CleanupSnapshot clears data from a snapshot object to free memory.
+// The snapshot object itself is passed by value or pointer, this helps clear its internal slices.
+func (s *Storage) CleanupSnapshot(snapshot *lsm.Snapshot) {
+	// This method operates on the snapshot object, not directly on s.Storage state.
+	// No s.mu lock needed here.
+	if snapshot != nil {
+		snapshot.ImmutableLayers = nil
+		snapshot.WALEntries = nil
+	}
 }

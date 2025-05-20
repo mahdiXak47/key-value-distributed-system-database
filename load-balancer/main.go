@@ -144,7 +144,13 @@ func (lb *LoadBalancer) getReplicaForPartition(partitionID int) *Node {
 }
 
 func (lb *LoadBalancer) updateFromController() error {
-	resp, err := http.Get(lb.controllerURL + "/cluster/status")
+	req, err := http.NewRequest("GET", lb.controllerURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to get cluster status: %v", err)
 	}

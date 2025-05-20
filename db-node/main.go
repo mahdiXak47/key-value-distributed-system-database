@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	dbStorage        = NewStorage()
+	dbStorage        = partition.NewStorage(0)
 	partitionManager = partition.NewManager()
 )
 

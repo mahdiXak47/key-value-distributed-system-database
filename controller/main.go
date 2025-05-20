@@ -23,6 +23,7 @@ func main() {
 	http.HandleFunc("/partition/remove", handlers.RemovePartitionHandler(cl))
 	http.HandleFunc("/partition/transfer", handlers.TransferPartitionHandler(cl))
 	http.HandleFunc("/partition/change-leader", handlers.ChangeLeaderHandler(cl))
+	http.HandleFunc("/cluster/status", handlers.ClusterStatusHandler(cl))
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("./static"))))
 	log.Println("Starting controller server on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
