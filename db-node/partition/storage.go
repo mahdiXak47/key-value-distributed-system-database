@@ -2,6 +2,7 @@ package partition
 
 import (
 	"sync"
+	"time"
 
 	"github.com/mahdiXak47/key-value-distributed-system-database/db-node/lsm"
 )
@@ -35,17 +36,23 @@ func NewStorage(partitionID int) *Storage {
 	}
 }
 
-// Set stores a key-value pair in the partition
-func (s *Storage) Set(key, value string) {
+// Set stores a key-value pair in the partition and returns the created WAL entry
+func (s *Storage) Set(key, value string) (lsm.LogEntry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Write to WAL first
-	s.wal.AddEntry("SET", key, value)
+	entry := lsm.LogEntry{
+		Operation: "SET",
+		Key:       key,
+		Value:     value,
+		Timestamp: time.Now(),
+	}
+	s.wal.AddEntry(entry)
 
 	// Then update storage
 	s.checkAndRotateMemTable()
 	s.memTable.Set(key, value)
+	return entry, nil
 }
 
 // Get retrieves a value for a key from the partition
@@ -73,17 +80,23 @@ func (s *Storage) Get(key string) (string, bool) {
 	return "", false
 }
 
-// Delete removes a key from the partition
-func (s *Storage) Delete(key string) {
+// Delete removes a key from the partition and returns the created WAL entry
+func (s *Storage) Delete(key string) (lsm.LogEntry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Write to WAL first
-	s.wal.AddEntry("DELETE", key, "")
+	entry := lsm.LogEntry{
+		Operation: "DELETE",
+		Key:       key,
+		Value:     "",
+		Timestamp: time.Now(),
+	}
+	s.wal.AddEntry(entry)
 
 	// Then update storage
 	s.checkAndRotateMemTable()
 	s.memTable.Delete(key)
+	return entry, nil
 }
 
 // checkAndRotateMemTable checks if the MemTable needs to be rotated

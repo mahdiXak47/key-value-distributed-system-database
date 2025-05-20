@@ -303,7 +303,7 @@ func (lb *LoadBalancer) handlePartitionResize(newNumPartitions int) {
 }
 
 func main() {
-	lb := NewLoadBalancer(5*time.Second, "http://localhost:8080", 10) // 10 partitions
+	lb := NewLoadBalancer(5*time.Second, "http://localhost:8080/cluster/status", 10) // Point to the correct /cluster/status endpoint
 
 	// Start health check
 	lb.startHealthCheck()

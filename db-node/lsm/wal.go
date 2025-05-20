@@ -26,17 +26,11 @@ func NewWAL() *WAL {
 	}
 }
 
-// AddEntry adds a new entry to the WAL
-func (w *WAL) AddEntry(operation, key, value string) {
+// AddEntry adds a new pre-constructed entry to the WAL
+func (w *WAL) AddEntry(entry LogEntry) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-
-	entry := LogEntry{
-		Operation: operation,
-		Key:       key,
-		Value:     value,
-		Timestamp: time.Now(),
-	}
+	// It's assumed the caller has already set the Timestamp on the entry
 	w.entries = append(w.entries, entry)
 }
 

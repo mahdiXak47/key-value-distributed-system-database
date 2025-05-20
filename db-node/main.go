@@ -3,17 +3,24 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
+	"github.com/mahdiXak47/key-value-distributed-system-database/db-node/config"
+	"github.com/mahdiXak47/key-value-distributed-system-database/db-node/lsm"
 	"github.com/mahdiXak47/key-value-distributed-system-database/db-node/partition"
 )
 
 var (
 	dbStorage        = partition.NewStorage(0)
 	partitionManager = partition.NewManager()
+	selfAddress      string
+	appConfig        *config.Config
 )
 
 type HealthStatus struct {
@@ -34,6 +41,12 @@ type PartitionInfo struct {
 	Role     string   `json:"role"`
 	Leader   string   `json:"leader"`
 	Replicas []string `json:"replicas"`
+}
+
+// ReplicationPayload defines the structure for data sent to replicas
+type ReplicationPayload struct {
+	PartitionID int64          `json:"partition_id"`
+	WALEntries  []lsm.LogEntry `json:"wal_entries"` // Assuming lsm.LogEntry is defined in the lsm package
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -179,7 +192,28 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 
 	// Store in partition storage
 	storage := partitionManager.GetPartition(partitionID).GetStorage()
-	storage.Set(kv.Key, kv.Value)
+	walEntry, err := storage.Set(kv.Key, kv.Value)
+	if err != nil {
+		response := KeyValueResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Error storing key-value for partition %d: %v", partitionID, err),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Asynchronously replicate to other nodes if this node is the leader
+	p := partitionManager.GetPartition(partitionID)
+	if p.Role == partition.RoleLeader {
+		log.Printf("Node is leader for partition %d. Replicating entry for key '%s'.", partitionID, kv.Key)
+		for _, replicaAddress := range p.Replicas {
+			if replicaAddress != selfAddress && replicaAddress != "" {
+				go replicateWALEntriesToNode(replicaAddress, partitionID, []lsm.LogEntry{walEntry})
+			}
+		}
+	}
 
 	// Send success response
 	response := KeyValueResponse{
@@ -434,7 +468,28 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 
 	// Delete from partition storage
 	storage := partitionManager.GetPartition(partitionID).GetStorage()
-	storage.Delete(kv.Key)
+	walEntry, err := storage.Delete(kv.Key)
+	if err != nil {
+		response := KeyValueResponse{
+			Success: false,
+			Error:   fmt.Sprintf("Error deleting key for partition %d: %v", partitionID, err),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Asynchronously replicate to other nodes if this node is the leader
+	p := partitionManager.GetPartition(partitionID)
+	if p.Role == partition.RoleLeader {
+		log.Printf("Node is leader for partition %d. Replicating delete for key '%s'.", partitionID, kv.Key)
+		for _, replicaAddress := range p.Replicas {
+			if replicaAddress != selfAddress && replicaAddress != "" {
+				go replicateWALEntriesToNode(replicaAddress, partitionID, []lsm.LogEntry{walEntry})
+			}
+		}
+	}
 
 	// Send success response
 	response := KeyValueResponse{
@@ -469,14 +524,132 @@ func handlePartitionAssignment(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+func handleReplicate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed for /replicate", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Error reading replication request body", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	var payload ReplicationPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		http.Error(w, "Invalid JSON for replication payload", http.StatusBadRequest)
+		return
+	}
+
+	if len(payload.WALEntries) == 0 {
+		http.Error(w, "No WAL entries provided in replication payload", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("Received replication request for partition %d with %d WAL entries", payload.PartitionID, len(payload.WALEntries))
+
+	// Check if this node is responsible for the partition (it should be a replica or leader)
+	// The partitionManager should have been updated by the controller via /partition/assign
+	p := partitionManager.GetPartition(int(payload.PartitionID)) // Cast to int if your GetPartition expects int
+	if p == nil {
+		log.Printf("Replication error: Node does not have partition %d assigned", payload.PartitionID)
+		http.Error(w, fmt.Sprintf("Node does not have partition %d assigned", payload.PartitionID), http.StatusNotFound)
+		return
+	}
+
+	// It must be a replica (or leader itself, though typically leaders don't replicate to themselves this way)
+	// For now, we assume if it has the partition, it can apply.
+	// More robust check: if p.Role == partition.RoleReplica (or if it's the leader applying its own replicated entries in some test scenario)
+
+	storage := p.GetStorage()
+	if storage == nil {
+		log.Printf("Replication error: Storage not found for partition %d", payload.PartitionID)
+		http.Error(w, fmt.Sprintf("Storage not found for partition %d", payload.PartitionID), http.StatusInternalServerError)
+		return
+	}
+
+	if err := storage.ApplyWALEntries(payload.WALEntries); err != nil {
+		log.Printf("Replication error: Failed to apply WAL entries for partition %d: %v", payload.PartitionID, err)
+		http.Error(w, fmt.Sprintf("Failed to apply WAL entries for partition %d: %v", payload.PartitionID, err), http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("Successfully applied %d WAL entries for partition %d via replication", len(payload.WALEntries), payload.PartitionID)
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Replication successful for partition %d", payload.PartitionID)
+}
+
+func replicateWALEntriesToNode(nodeAddress string, pID int, entries []lsm.LogEntry) {
+	if nodeAddress == "" || len(entries) == 0 {
+		return // Nothing to do or nowhere to send
+	}
+
+	payload := ReplicationPayload{
+		PartitionID: int64(pID),
+		WALEntries:  entries,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("Failed to marshal replication payload for node %s, partition %d: %v", nodeAddress, pID, err)
+		return
+	}
+
+	// Ensure address starts with http:// or https://
+	// This is a simplified check; a robust solution would parse and reconstruct the URL.
+	destAddr := nodeAddress
+	if !strings.HasPrefix(destAddr, "http://") && !strings.HasPrefix(destAddr, "https://") {
+		destAddr = "http://" + destAddr
+	}
+	url := fmt.Sprintf("%s/replicate", destAddr)
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Printf("Failed to create replication request to %s for partition %d: %v", url, pID, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second} // Increased timeout for replication calls
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Failed to send replication request to %s for partition %d: %v", url, pID, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		// TODO: Implement more robust error handling for failed replications, e.g., retries, marking replica as stale.
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		log.Printf("Replication to node %s for partition %d failed with status %d: %s", nodeAddress, pID, resp.StatusCode, string(bodyBytes))
+		return
+	}
+
+	log.Printf("Successfully sent replication request to node %s for partition %d (%d entries)", nodeAddress, pID, len(entries))
+}
+
 func main() {
+	// Load configuration
+	cfg, err := config.LoadConfig("config.json")
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
+	appConfig = cfg
+	selfAddress = fmt.Sprintf("%s:%d", appConfig.Host, appConfig.Port)
+	log.Printf("Node self address configured as: %s", selfAddress)
+
 	// Set up HTTP handlers
 	http.HandleFunc("/get", handleGet)
 	http.HandleFunc("/set", handleSet)
 	http.HandleFunc("/delete", handleDelete)
 	http.HandleFunc("/health", handleHealth)
 	http.HandleFunc("/partition/assign", handlePartitionAssignment)
+	http.HandleFunc("/replicate", handleReplicate)
 
-	log.Println("DB Node running on :9001")
-	log.Fatal(http.ListenAndServe(":9001", nil))
+	log.Printf("DB Node running on %s", selfAddress)
+	if err := http.ListenAndServe(selfAddress, nil); err != nil {
+		log.Fatalf("Failed to start server: %v", err)
+	}
 }
