@@ -140,14 +140,18 @@ func IndexHandler(cl *cluster.Cluster, tmpl *template.Template) http.HandlerFunc
 // AddNodeHandler processes adding a new node (POST /node/add).
 func AddNodeHandler(cl *cluster.Cluster) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("Controller: Received request to add new node")
 		r.ParseForm()
 		name := r.FormValue("name")
 		addr := r.FormValue("address")
+		log.Printf("Controller: Adding node - Name: %s, Address: %s", name, addr)
 
 		if err := cl.AddNode(name, addr); err != nil {
+			log.Printf("Controller: Failed to add node - Error: %v", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		log.Printf("Controller: Successfully added node %s at %s", name, addr)
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	}
 }
@@ -155,9 +159,13 @@ func AddNodeHandler(cl *cluster.Cluster) http.HandlerFunc {
 // RemoveNodeHandler processes removing a node (POST /node/remove).
 func RemoveNodeHandler(cl *cluster.Cluster) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("Controller: Received request to remove node")
 		r.ParseForm()
 		id, _ := strconv.Atoi(r.FormValue("id"))
+		log.Printf("Controller: Removing node with ID: %d", id)
+
 		cl.RemoveNode(id)
+		log.Printf("Controller: Successfully removed node %d", id)
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	}
 }
@@ -165,10 +173,13 @@ func RemoveNodeHandler(cl *cluster.Cluster) http.HandlerFunc {
 // AddPartitionHandler processes adding a partition (POST /partition/add).
 func AddPartitionHandler(cl *cluster.Cluster) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("Controller: Received request to add new partition")
 		if err := cl.AddPartition(); err != nil {
+			log.Printf("Controller: Failed to add partition - Error: %v", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		log.Printf("Controller: Successfully added new partition")
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	}
 }
@@ -176,9 +187,13 @@ func AddPartitionHandler(cl *cluster.Cluster) http.HandlerFunc {
 // RemovePartitionHandler processes removing a partition (POST /partition/remove).
 func RemovePartitionHandler(cl *cluster.Cluster) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("Controller: Received request to remove partition")
 		r.ParseForm()
 		id, _ := strconv.Atoi(r.FormValue("id"))
+		log.Printf("Controller: Removing partition with ID: %d", id)
+
 		cl.RemovePartition(id)
+		log.Printf("Controller: Successfully removed partition %d", id)
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	}
 }
@@ -186,10 +201,14 @@ func RemovePartitionHandler(cl *cluster.Cluster) http.HandlerFunc {
 // TransferPartitionHandler processes transferring a partition to a new node.
 func TransferPartitionHandler(cl *cluster.Cluster) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("Controller: Received request to transfer partition")
 		r.ParseForm()
 		pid, _ := strconv.Atoi(r.FormValue("id"))
 		newNodeID, _ := strconv.Atoi(r.FormValue("newNodeID"))
+		log.Printf("Controller: Transferring partition %d to node %d", pid, newNodeID)
+
 		cl.TransferPartition(pid, newNodeID)
+		log.Printf("Controller: Successfully transferred partition %d to node %d", pid, newNodeID)
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	}
 }
@@ -197,10 +216,14 @@ func TransferPartitionHandler(cl *cluster.Cluster) http.HandlerFunc {
 // ChangeLeaderHandler processes forcing a new leader for a partition.
 func ChangeLeaderHandler(cl *cluster.Cluster) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("Controller: Received request to change partition leader")
 		r.ParseForm()
 		pid, _ := strconv.Atoi(r.FormValue("id"))
 		newLeaderID, _ := strconv.Atoi(r.FormValue("newLeaderID"))
+		log.Printf("Controller: Changing leader for partition %d to node %d", pid, newLeaderID)
+
 		cl.ChangeLeader(pid, newLeaderID)
+		log.Printf("Controller: Successfully changed leader for partition %d to node %d", pid, newLeaderID)
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	}
 }
@@ -208,6 +231,7 @@ func ChangeLeaderHandler(cl *cluster.Cluster) http.HandlerFunc {
 // ClusterStatusHandler returns the current cluster status in JSON format
 func ClusterStatusHandler(cl *cluster.Cluster) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("Controller: Received request for cluster status")
 		if cl == nil {
 			log.Println("ClusterStatusHandler error: cluster.Cluster instance is nil")
 			http.Error(w, "Internal server error: cluster data unavailable", http.StatusInternalServerError)
@@ -217,6 +241,7 @@ func ClusterStatusHandler(cl *cluster.Cluster) http.HandlerFunc {
 		// Get current cluster state
 		nodes := cl.GetNodes()
 		partitions := cl.GetPartitions()
+		log.Printf("Controller: Current cluster state - Nodes: %d, Partitions: %d", len(nodes), len(partitions))
 
 		if nodes == nil {
 			log.Println("ClusterStatusHandler error: cl.GetNodes() returned nil map")
@@ -252,9 +277,11 @@ func ClusterStatusHandler(cl *cluster.Cluster) http.HandlerFunc {
 
 		// Populate partition details in response and gather info for nodes
 		for _, part := range partitions {
+			log.Printf("Controller: Processing partition %d", part.ID)
 			leaderAddr := ""
 			if leaderNode, ok := nodes[part.LeaderID]; ok {
 				leaderAddr = leaderNode.Address
+				log.Printf("Controller: Partition %d leader: %s", part.ID, leaderAddr)
 				if _, exists := nodeDetailsMap[leaderAddr]; !exists {
 					nodeDetailsMap[leaderAddr] = struct {
 						IsLeader   bool
@@ -271,6 +298,7 @@ func ClusterStatusHandler(cl *cluster.Cluster) http.HandlerFunc {
 			for _, replicaID := range part.Replicas {
 				if replicaNode, ok := nodes[replicaID]; ok {
 					replicaAddrs = append(replicaAddrs, replicaNode.Address)
+					log.Printf("Controller: Partition %d replica: %s", part.ID, replicaNode.Address)
 					// Mark this node as part of this partition
 					if _, exists := nodeDetailsMap[replicaNode.Address]; !exists {
 						nodeDetailsMap[replicaNode.Address] = struct {
@@ -320,7 +348,7 @@ func ClusterStatusHandler(cl *cluster.Cluster) http.HandlerFunc {
 			})
 		}
 
-		// Set response headers and encode JSON
+		log.Printf("Controller: Sending cluster status response")
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(response); err != nil {
 			log.Printf("ClusterStatusHandler error: Failed to encode JSON response: %v", err)

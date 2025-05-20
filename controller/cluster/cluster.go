@@ -13,10 +13,11 @@ import (
 )
 
 type Node struct {
-	ID      int
-	Name    string
-	Address string
-	Active  bool // true means up , false means down
+	ID         int
+	Name       string
+	Address    string
+	Active     bool
+	Partitions []int // List of partition IDs this node is responsible for
 }
 
 type Partition struct {
@@ -170,17 +171,21 @@ func (c *Cluster) StartHealthChecks(interval time.Duration) {
 }
 
 func (c *Cluster) AddNode(name, address string) error {
+	log.Printf("Cluster: Adding new node - Name: %s, Address: %s", name, address)
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	// Validate input
 	if name == "" || address == "" {
+		log.Printf("Cluster: Invalid input - Name and address are required")
 		return fmt.Errorf("name and address are required")
 	}
 
 	// Check if node with same address already exists
 	for _, node := range c.nodes {
 		if node.Address == address {
+			log.Printf("Cluster: Node with address %s already exists", address)
 			return fmt.Errorf("node with address %s already exists", address)
 		}
 	}
@@ -193,294 +198,291 @@ func (c *Cluster) AddNode(name, address string) error {
 		Active:  true,
 	}
 	c.nodes[node.ID] = node
-	log.Printf("Added new node: %s (%s) with ID %d", name, address, node.ID)
+	log.Printf("Cluster: Added new node: %s (%s) with ID %d", name, address, node.ID)
+
+	// Rebalance partitions if needed
+	if len(c.partitions) > 0 {
+		log.Printf("Cluster: Rebalancing partitions after adding new node")
+		c.rebalancePartitions()
+	}
+
 	return nil
 }
 
 func (c *Cluster) RemoveNode(id int) {
-	c.mu.Lock()
-	// defer c.mu.Unlock() // Unlock will be handled after notifications
+	log.Printf("Cluster: Removing node with ID: %d", id)
 
-	removedNode, nodeExists := c.nodes[id]
-	if !nodeExists {
-		c.mu.Unlock()
-		log.Printf("RemoveNode: Node %d not found.", id)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Check if node exists
+	if _, exists := c.nodes[id]; !exists {
+		log.Printf("Cluster: Node %d does not exist", id)
 		return
 	}
-	log.Printf("Removing node %d (%s) from cluster.", id, removedNode.Address)
+
+	// Get node's partitions
+	node := c.nodes[id]
+	log.Printf("Cluster: Node %d has %d partitions", id, len(node.Partitions))
+
+	// Remove node from partitions
+	for _, partID := range node.Partitions {
+		if part, exists := c.partitions[partID]; exists {
+			log.Printf("Cluster: Removing node %d from partition %d", id, partID)
+			// Remove from replicas
+			for i, replicaID := range part.Replicas {
+				if replicaID == id {
+					part.Replicas = append(part.Replicas[:i], part.Replicas[i+1:]...)
+					break
+				}
+			}
+			// If node was leader, select new leader
+			if part.LeaderID == id {
+				log.Printf("Cluster: Node %d was leader for partition %d, selecting new leader", id, partID)
+				if len(part.Replicas) > 0 {
+					part.LeaderID = part.Replicas[0]
+					part.Replicas = part.Replicas[1:]
+				} else {
+					// No replicas left, partition is now leaderless
+					log.Printf("Cluster: Warning - Partition %d has no leader after node removal", partID)
+					part.LeaderID = -1
+				}
+			}
+		}
+	}
+
+	// Remove node
+	log.Printf("Cluster: Deleting node %d from cluster", id)
 	delete(c.nodes, id)
 
-	partitionsToNotify := make(map[int]bool) // Set of partition IDs that were affected
-
-	// Remove node from all partition replicas and handle leader changes
-	for partID, part := range c.partitions {
-		wasLeader := (part.LeaderID == id)
-		wasReplica := false
-		newReplicas := []int{}
-		for _, nid := range part.Replicas {
-			if nid != id {
-				newReplicas = append(newReplicas, nid)
-			} else {
-				wasReplica = true
-			}
-		}
-
-		if wasLeader || wasReplica {
-			partitionsToNotify[partID] = true
-			part.Replicas = newReplicas
-			log.Printf("Node %d removed from replicas of partition %d. New replica set: %v", id, partID, newReplicas)
-
-			if wasLeader {
-				part.LastLeaderID = id
-				if len(newReplicas) > 0 {
-					// Simplistic: pick the first remaining replica as the new leader
-					// A more robust system might use a defined election or check node health/load.
-					part.LeaderID = newReplicas[0]
-					log.Printf("Node %d was leader of partition %d. New leader is Node %d.", id, partID, part.LeaderID)
-				} else {
-					part.LeaderID = 0 // No leader left
-					log.Printf("Node %d was leader of partition %d. No replicas left to promote.", id, partID)
-				}
-			}
-		} // else: removed node was not part of this partition, no change to part.Replicas or part.LeaderID
+	// Rebalance partitions
+	if len(c.partitions) > 0 {
+		log.Printf("Cluster: Rebalancing partitions after node removal")
+		c.rebalancePartitions()
 	}
-	c.mu.Unlock() // Release lock before network calls
 
-	// Notify nodes of affected partitions
-	if len(partitionsToNotify) > 0 {
-		currentNodes := c.GetNodes() // Get a fresh copy of nodes (excluding the removed one)
-		currentPartitions := c.GetPartitions()
-
-		for partID := range partitionsToNotify {
-			affectedPartition, pExists := currentPartitions[partID]
-			if !pExists {
-				log.Printf("RemoveNode: Partition %d (marked for notification) not found after node removal.", partID)
-				continue
-			}
-
-			leaderAddress := ""
-			if affectedPartition.LeaderID != 0 { // Check if there is still a leader
-				if lNode, exists := currentNodes[affectedPartition.LeaderID]; exists {
-					leaderAddress = lNode.Address
-				} else {
-					log.Printf("RemoveNode: Leader node %d not found for partition %d during notification.", affectedPartition.LeaderID, partID)
-					// This partition might be temporarily leaderless or its leader is not in currentNodes (should not happen if logic is correct)
-					// For now, we proceed, and replicas will get an empty leader address if so.
-				}
-			}
-
-			allReplicaNodeAddresses := []string{}
-			nodesToNotifyForThisPartition := make(map[string]NodePartitionInfo) // nodeAddress -> assignmentInfo
-
-			for _, replicaNodeID := range affectedPartition.Replicas {
-				node, nodeExists := currentNodes[replicaNodeID]
-				if !nodeExists {
-					log.Printf("RemoveNode: Replica node %d (ID) not found for partition %d during notification. It might be the one just removed or another issue.", replicaNodeID, partID)
-					continue
-				}
-				allReplicaNodeAddresses = append(allReplicaNodeAddresses, node.Address)
-
-				role := "replica"
-				if replicaNodeID == affectedPartition.LeaderID {
-					role = "leader"
-				}
-				nodesToNotifyForThisPartition[node.Address] = NodePartitionInfo{
-					ID:       affectedPartition.ID,
-					Role:     role,
-					Leader:   leaderAddress,
-					Replicas: nil, // Placeholder
-				}
-			}
-
-			// Fill replica addresses for each notification for this partition
-			for addr, info := range nodesToNotifyForThisPartition {
-				info.Replicas = allReplicaNodeAddresses
-				nodesToNotifyForThisPartition[addr] = info
-			}
-
-			for nodeAddrToNotify, assignmentInfo := range nodesToNotifyForThisPartition {
-				go func(addr string, pInfo NodePartitionInfo) {
-					if err := c.notifyNode(addr, pInfo); err != nil {
-						log.Printf("RemoveNode: Failed to notify node %s about partition %d change after node removal: %v", addr, pInfo.ID, err)
-					}
-				}(nodeAddrToNotify, assignmentInfo)
-			}
-		}
-	}
+	log.Printf("Cluster: Successfully removed node %d", id)
 }
 
 func (c *Cluster) AddPartition() error {
+	log.Printf("Cluster: Adding new partition")
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Check if we have any active nodes available
-	activeNodes := 0
-	for _, node := range c.nodes {
-		if node.Active {
-			activeNodes++
-		}
-	}
-	if activeNodes == 0 {
-		return fmt.Errorf("no active nodes available to create partition")
-	}
-
+	// Create new partition
 	c.nextPartID++
-	part := &Partition{
-		ID:       c.nextPartID,
-		Replicas: []int{},
+	partID := c.nextPartID
+	partition := &Partition{
+		ID:       partID,
+		LeaderID: -1,
+		Replicas: make([]int, 0),
 	}
 
-	// Find the node with the least number of partitions to be the leader
-	leaderID := c.findOptimalLeader()
-	if leaderID == 0 {
-		return fmt.Errorf("no suitable active leader found")
-	}
+	log.Printf("Cluster: Created new partition with ID: %d", partID)
+	c.partitions[partID] = partition
 
-	part.LeaderID = leaderID
-	part.Replicas = append(part.Replicas, leaderID)
-
-	// Add one more replica if available
-	if activeNodes > 1 {
-		replicaID := c.findOptimalReplica(leaderID)
-		if replicaID != 0 {
-			part.Replicas = append(part.Replicas, replicaID)
-		}
-	}
-
-	c.partitions[part.ID] = part
-	log.Printf("Created new partition %d with leader node %d", part.ID, leaderID)
-
-	// Unlock before sending notifications to avoid holding lock during network calls
-	c.mu.Unlock()
-
-	// Notify relevant nodes
-	// leaderNode := c.nodes[part.LeaderID] // This was unused, removing it.
-
-	// It's safer to re-acquire read lock to get node details if GetNodes is used,
-	// or pass necessary node details to a notification function that doesn't need cluster lock.
-	// For simplicity here, assuming c.nodes[id] access is okay after initial lock release if AddNode/RemoveNode take full lock.
-	// A better approach would be to get all necessary data under lock, then release, then notify.
-
-	// Let's get all node addresses involved in this partition
-	// Need to read c.nodes and c.partitions again, preferably under RLock if not already done
-	// For now, assuming part and leaderNode are stable after unlock for this example flow.
-	// This section needs careful thought on locking for a production system.
-
-	allNodesInPartition := make(map[int]*Node)
-	involvedNodeAddresses := make(map[int]string) // nodeID to address
-
-	currentNodes := c.GetNodes()           // This gets a copy under RLock
-	currentPartitions := c.GetPartitions() // This gets a copy under RLock
-
-	specificPartition, ok := currentPartitions[part.ID]
-	if !ok {
-		log.Printf("Partition %d not found after creation for notification, this should not happen.", part.ID)
-		return fmt.Errorf("partition %d not found after creation for notification", part.ID)
-	}
-
-	var leaderAddress string
-	if lNode, exists := currentNodes[specificPartition.LeaderID]; exists {
-		leaderAddress = lNode.Address
+	// Assign partition to nodes
+	if len(c.nodes) > 0 {
+		log.Printf("Cluster: Assigning partition %d to nodes", partID)
+		c.assignPartition(partID)
 	} else {
-		log.Printf("Leader node %d not found for partition %d during notification.", specificPartition.LeaderID, specificPartition.ID)
-		// Cannot proceed without leader address
-		return fmt.Errorf("leader node %d not found for partition %d", specificPartition.LeaderID, specificPartition.ID)
+		log.Printf("Cluster: Warning - No nodes available to assign partition %d", partID)
 	}
 
-	replicaAddresses := []string{}
-	for _, replicaNodeID := range specificPartition.Replicas {
-		if rNode, exists := currentNodes[replicaNodeID]; exists {
-			allNodesInPartition[replicaNodeID] = rNode
-			involvedNodeAddresses[replicaNodeID] = rNode.Address
-			replicaAddresses = append(replicaAddresses, rNode.Address)
-		} else {
-			log.Printf("Replica node %d not found for partition %d during notification.", replicaNodeID, specificPartition.ID)
-			// Continue notifying other replicas
-		}
-	}
-
-	for nodeID, node := range allNodesInPartition {
-		role := "replica"
-		if nodeID == specificPartition.LeaderID {
-			role = "leader"
-		}
-		assignmentInfo := NodePartitionInfo{
-			ID:       specificPartition.ID,
-			Role:     role,
-			Leader:   leaderAddress,    // Address of the current leader
-			Replicas: replicaAddresses, // Addresses of all replicas in this partition
-		}
-		// Asynchronously notify or handle errors carefully
-		go func(addr string, pInfo NodePartitionInfo) {
-			if err := c.notifyNode(addr, pInfo); err != nil {
-				log.Printf("Failed to notify node %s about partition %d: %v", addr, pInfo.ID, err)
-				// Further error handling: retry, mark node as having stale config, etc.
-			}
-		}(node.Address, assignmentInfo)
-	}
-
+	log.Printf("Cluster: Successfully added partition %d", partID)
 	return nil
 }
 
-// findOptimalLeader returns the ID of the node that should be the leader
-// based on the number of partitions it currently leads
-func (c *Cluster) findOptimalLeader() int {
-	leaderCount := make(map[int]int)
-
-	// Count how many partitions each node leads
-	for _, part := range c.partitions {
-		leaderCount[part.LeaderID]++
-	}
-
-	// Find the active node with the least number of partitions
-	minCount := -1
-	var optimalLeader int
-	for id, node := range c.nodes {
-		if !node.Active {
-			continue
-		}
-		count := leaderCount[id]
-		if minCount == -1 || count < minCount {
-			minCount = count
-			optimalLeader = id
-		}
-	}
-	return optimalLeader
-}
-
-// findOptimalReplica returns the ID of the best node to be a replica
-// that is not the current leader and is active
-func (c *Cluster) findOptimalReplica(leaderID int) int {
-	replicaCount := make(map[int]int)
-
-	// Count how many partitions each node is a replica for
-	for _, part := range c.partitions {
-		for _, replicaID := range part.Replicas {
-			replicaCount[replicaID]++
-		}
-	}
-
-	// Find the active node with the least number of replicas that isn't the leader
-	minCount := -1
-	var optimalReplica int
-	for id, node := range c.nodes {
-		if !node.Active || id == leaderID {
-			continue
-		}
-		count := replicaCount[id]
-		if minCount == -1 || count < minCount {
-			minCount = count
-			optimalReplica = id
-		}
-	}
-	return optimalReplica
-}
-
 func (c *Cluster) RemovePartition(id int) {
+	log.Printf("Cluster: Removing partition %d", id)
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Check if partition exists
+	if _, exists := c.partitions[id]; !exists {
+		log.Printf("Cluster: Partition %d does not exist", id)
+		return
+	}
+
+	// Remove partition from nodes
+	partition := c.partitions[id]
+	log.Printf("Cluster: Removing partition %d from leader %d and %d replicas",
+		id, partition.LeaderID, len(partition.Replicas))
+
+	// Remove from leader
+	if leader, exists := c.nodes[partition.LeaderID]; exists {
+		for i, pID := range leader.Partitions {
+			if pID == id {
+				leader.Partitions = append(leader.Partitions[:i], leader.Partitions[i+1:]...)
+				break
+			}
+		}
+	}
+
+	// Remove from replicas
+	for _, replicaID := range partition.Replicas {
+		if replica, exists := c.nodes[replicaID]; exists {
+			for i, pID := range replica.Partitions {
+				if pID == id {
+					replica.Partitions = append(replica.Partitions[:i], replica.Partitions[i+1:]...)
+					break
+				}
+			}
+		}
+	}
+
+	// Remove partition
+	log.Printf("Cluster: Deleting partition %d from cluster", id)
 	delete(c.partitions, id)
+
+	log.Printf("Cluster: Successfully removed partition %d", id)
+}
+
+func (c *Cluster) assignPartition(partID int) {
+	log.Printf("Cluster: Starting partition assignment for partition %d", partID)
+
+	partition := c.partitions[partID]
+	if partition == nil {
+		log.Printf("Cluster: Error - Partition %d does not exist", partID)
+		return
+	}
+
+	// Get available nodes
+	availableNodes := make([]int, 0)
+	for nodeID, node := range c.nodes {
+		if node.Active {
+			availableNodes = append(availableNodes, nodeID)
+			log.Printf("Cluster: Node %d (%s) is available for partition %d", nodeID, node.Address, partID)
+		} else {
+			log.Printf("Cluster: Node %d (%s) is not active, skipping for partition %d", nodeID, node.Address, partID)
+		}
+	}
+
+	if len(availableNodes) == 0 {
+		log.Printf("Cluster: Warning - No active nodes available for partition %d", partID)
+		return
+	}
+
+	// Select leader
+	leaderID := availableNodes[0]
+	leaderNode := c.nodes[leaderID]
+	log.Printf("Cluster: Selected node %d (%s) as leader for partition %d", leaderID, leaderNode.Address, partID)
+	partition.LeaderID = leaderID
+	c.nodes[leaderID].Partitions = append(c.nodes[leaderID].Partitions, partID)
+
+	// Select replicas (if any nodes left)
+	if len(availableNodes) > 1 {
+		replicaCount := min(len(availableNodes)-1, 2) // Use at most 2 replicas
+		log.Printf("Cluster: Assigning %d replicas for partition %d", replicaCount, partID)
+
+		for i := 1; i <= replicaCount; i++ {
+			replicaID := availableNodes[i]
+			replicaNode := c.nodes[replicaID]
+			partition.Replicas = append(partition.Replicas, replicaID)
+			c.nodes[replicaID].Partitions = append(c.nodes[replicaID].Partitions, partID)
+			log.Printf("Cluster: Assigned node %d (%s) as replica for partition %d", replicaID, replicaNode.Address, partID)
+		}
+	} else {
+		log.Printf("Cluster: No additional nodes available for replicas of partition %d", partID)
+	}
+
+	// Notify nodes about their roles
+	log.Printf("Cluster: Notifying nodes about their roles for partition %d", partID)
+	currentNodes := c.GetNodes()
+	leaderAddress := currentNodes[leaderID].Address
+	replicaAddresses := make([]string, 0)
+	for _, replicaID := range partition.Replicas {
+		if replica, exists := currentNodes[replicaID]; exists {
+			replicaAddresses = append(replicaAddresses, replica.Address)
+		}
+	}
+
+	// Notify leader
+	leaderInfo := NodePartitionInfo{
+		ID:       partID,
+		Role:     "leader",
+		Leader:   leaderAddress,
+		Replicas: replicaAddresses,
+	}
+	log.Printf("Cluster: Notifying leader %s about partition %d", leaderAddress, partID)
+	go func() {
+		if err := c.notifyNode(leaderAddress, leaderInfo); err != nil {
+			log.Printf("Cluster: Error notifying leader %s about partition %d: %v", leaderAddress, partID, err)
+		}
+	}()
+
+	// Notify replicas
+	for _, replicaAddr := range replicaAddresses {
+		replicaInfo := NodePartitionInfo{
+			ID:       partID,
+			Role:     "replica",
+			Leader:   leaderAddress,
+			Replicas: replicaAddresses,
+		}
+		log.Printf("Cluster: Notifying replica %s about partition %d", replicaAddr, partID)
+		go func(addr string, info NodePartitionInfo) {
+			if err := c.notifyNode(addr, info); err != nil {
+				log.Printf("Cluster: Error notifying replica %s about partition %d: %v", addr, partID, err)
+			}
+		}(replicaAddr, replicaInfo)
+	}
+
+	log.Printf("Cluster: Successfully assigned partition %d - Leader: %d (%s), Replicas: %v",
+		partID, partition.LeaderID, leaderAddress, replicaAddresses)
+}
+
+func (c *Cluster) rebalancePartitions() {
+	log.Printf("Cluster: Starting partition rebalancing")
+
+	// Get active nodes
+	activeNodes := make([]int, 0)
+	for nodeID, node := range c.nodes {
+		if node.Active {
+			activeNodes = append(activeNodes, nodeID)
+		}
+	}
+
+	if len(activeNodes) == 0 {
+		log.Printf("Cluster: Warning - No active nodes for rebalancing")
+		return
+	}
+
+	// Calculate target partitions per node
+	totalPartitions := len(c.partitions)
+	targetPerNode := totalPartitions / len(activeNodes)
+	extraPartitions := totalPartitions % len(activeNodes)
+
+	log.Printf("Cluster: Rebalancing %d partitions across %d nodes (target: %d per node, %d extra)",
+		totalPartitions, len(activeNodes), targetPerNode, extraPartitions)
+
+	// Clear current assignments
+	for _, node := range c.nodes {
+		node.Partitions = make([]int, 0)
+	}
+	for _, partition := range c.partitions {
+		partition.LeaderID = -1
+		partition.Replicas = make([]int, 0)
+	}
+
+	// Reassign partitions
+	partID := 0
+	for _, nodeID := range activeNodes {
+		partitionsForNode := targetPerNode
+		if extraPartitions > 0 {
+			partitionsForNode++
+			extraPartitions--
+		}
+
+		log.Printf("Cluster: Assigning %d partitions to node %d", partitionsForNode, nodeID)
+		for i := 0; i < partitionsForNode && partID < totalPartitions; i++ {
+			c.assignPartition(partID)
+			partID++
+		}
+	}
+
+	log.Printf("Cluster: Completed partition rebalancing")
 }
 
 func (c *Cluster) TransferPartition(pid, newNodeID int) {

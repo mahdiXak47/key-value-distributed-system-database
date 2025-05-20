@@ -50,12 +50,17 @@ type ReplicationPayload struct {
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
+	log.Printf("DB-Node: Received health check request from %s", r.RemoteAddr)
+
 	metrics := dbStorage.GetMetrics()
 	status := HealthStatus{
 		Status:       "OK",
 		MemTableSize: metrics["memTableSize"].(int),
 		Levels:       metrics["levels"].(int),
+		Partitions:   partitionManager.GetPartitionIDs(),
 	}
+	log.Printf("DB-Node: Health status - MemTableSize: %d, Levels: %d, Partitions: %v",
+		status.MemTableSize, status.Levels, status.Partitions)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -63,7 +68,11 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleSet(w http.ResponseWriter, r *http.Request) {
+	log.Printf("DB-Node: Received SET request from %s", r.RemoteAddr)
+	log.Printf("DB-Node: Request headers: %v", r.Header)
+
 	if r.Method != http.MethodPost {
+		log.Printf("DB-Node: Invalid method %s", r.Method)
 		response := KeyValueResponse{
 			Success: false,
 			Error:   "Method not allowed",
@@ -77,6 +86,7 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 	// Read request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		log.Printf("DB-Node: Error reading request body: %v", err)
 		response := KeyValueResponse{
 			Success: false,
 			Error:   "Error reading request body",
@@ -94,6 +104,7 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 		Value string `json:"value"`
 	}
 	if err := json.Unmarshal(body, &kv); err != nil {
+		log.Printf("DB-Node: Error parsing JSON: %v", err)
 		response := KeyValueResponse{
 			Success: false,
 			Error:   "Invalid JSON format",
@@ -103,9 +114,11 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(response)
 		return
 	}
+	log.Printf("DB-Node: Parsed key-value pair - Key: %s, Value length: %d", kv.Key, len(kv.Value))
 
 	// Validate input
 	if kv.Key == "" {
+		log.Printf("DB-Node: Empty key received")
 		response := KeyValueResponse{
 			Success: false,
 			Error:   "Key cannot be empty",
@@ -119,6 +132,7 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 	// Get partition ID from header
 	partitionIDStr := r.Header.Get("X-Partition-ID")
 	if partitionIDStr == "" {
+		log.Printf("DB-Node: Missing X-Partition-ID header")
 		response := KeyValueResponse{
 			Success: false,
 			Error:   "Partition ID is required",
@@ -131,6 +145,7 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 
 	partitionID, err := strconv.Atoi(partitionIDStr)
 	if err != nil {
+		log.Printf("DB-Node: Invalid partition ID %s: %v", partitionIDStr, err)
 		response := KeyValueResponse{
 			Success: false,
 			Error:   "Invalid partition ID",
@@ -140,9 +155,11 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(response)
 		return
 	}
+	log.Printf("DB-Node: Processing request for partition %d", partitionID)
 
 	// Check if this node is responsible for the partition
 	if !partitionManager.HasPartition(partitionID) {
+		log.Printf("DB-Node: Node does not have partition %d", partitionID)
 		response := KeyValueResponse{
 			Success: false,
 			Error:   "Partition not found",
@@ -155,9 +172,11 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 
 	// Check if this node is the leader for the partition
 	if !partitionManager.IsLeader(partitionID) {
+		log.Printf("DB-Node: Node is not leader for partition %d, forwarding to leader", partitionID)
 		// Forward to leader
 		p := partitionManager.GetPartition(partitionID)
 		if p == nil {
+			log.Printf("DB-Node: Failed to get partition info for %d", partitionID)
 			response := KeyValueResponse{
 				Success: false,
 				Error:   "Partition not found",
@@ -170,8 +189,10 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 
 		// Forward request to leader
 		leaderURL := p.Leader + r.URL.Path
+		log.Printf("DB-Node: Forwarding to leader at %s", leaderURL)
 		resp, err := http.Post(leaderURL, "application/json", bytes.NewBuffer(body))
 		if err != nil {
+			log.Printf("DB-Node: Error forwarding to leader: %v", err)
 			response := KeyValueResponse{
 				Success: false,
 				Error:   "Error forwarding to leader",
@@ -183,6 +204,7 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 		}
 		defer resp.Body.Close()
 
+		log.Printf("DB-Node: Received response from leader with status %d", resp.StatusCode)
 		// Copy response from leader
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
@@ -190,10 +212,12 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf("DB-Node: Node is leader for partition %d, storing key-value", partitionID)
 	// Store in partition storage
 	storage := partitionManager.GetPartition(partitionID).GetStorage()
 	walEntry, err := storage.Set(kv.Key, kv.Value)
 	if err != nil {
+		log.Printf("DB-Node: Error storing key-value: %v", err)
 		response := KeyValueResponse{
 			Success: false,
 			Error:   fmt.Sprintf("Error storing key-value for partition %d: %v", partitionID, err),
@@ -203,13 +227,15 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(response)
 		return
 	}
+	log.Printf("DB-Node: Successfully stored key-value pair")
 
 	// Asynchronously replicate to other nodes if this node is the leader
 	p := partitionManager.GetPartition(partitionID)
 	if p.Role == partition.RoleLeader {
-		log.Printf("Node is leader for partition %d. Replicating entry for key '%s'.", partitionID, kv.Key)
+		log.Printf("DB-Node: Starting replication for partition %d", partitionID)
 		for _, replicaAddress := range p.Replicas {
 			if replicaAddress != selfAddress && replicaAddress != "" {
+				log.Printf("DB-Node: Replicating to %s", replicaAddress)
 				go replicateWALEntriesToNode(replicaAddress, partitionID, []lsm.LogEntry{walEntry})
 			}
 		}
@@ -223,6 +249,7 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
+	log.Printf("DB-Node: Successfully completed SET operation")
 }
 
 func handleGet(w http.ResponseWriter, r *http.Request) {
@@ -502,16 +529,22 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 
 // Handle partition assignment from controller
 func handlePartitionAssignment(w http.ResponseWriter, r *http.Request) {
+	log.Printf("DB-Node: Received partition assignment request from %s", r.RemoteAddr)
+
 	if r.Method != http.MethodPost {
+		log.Printf("DB-Node: Invalid method %s for partition assignment", r.Method)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	var info PartitionInfo
 	if err := json.NewDecoder(r.Body).Decode(&info); err != nil {
+		log.Printf("DB-Node: Error decoding partition assignment: %v", err)
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
+	log.Printf("DB-Node: Received partition assignment - ID: %d, Role: %s, Leader: %s, Replicas: %v",
+		info.ID, info.Role, info.Leader, info.Replicas)
 
 	// Add or update partition
 	partitionManager.AddPartition(
@@ -520,6 +553,7 @@ func handlePartitionAssignment(w http.ResponseWriter, r *http.Request) {
 		info.Leader,
 		info.Replicas,
 	)
+	log.Printf("DB-Node: Successfully processed partition assignment for partition %d", info.ID)
 
 	w.WriteHeader(http.StatusOK)
 }

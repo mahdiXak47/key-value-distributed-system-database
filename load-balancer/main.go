@@ -7,6 +7,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -94,28 +96,33 @@ func (lb *LoadBalancer) startHealthCheck() {
 	}()
 }
 
-func (lb *LoadBalancer) getPartitionForKey(key string) int {
-	return lb.partitionManager.GetPartition(key)
-}
-
 func (lb *LoadBalancer) getLeaderForPartition(partitionID int) *Node {
 	lb.mu.RLock()
 	defer lb.mu.RUnlock()
 
+	log.Printf("LoadBalancer: Looking up leader for partition %d", partitionID)
+
 	if partitionID < 0 || partitionID >= len(lb.partitions) {
+		log.Printf("LoadBalancer: Invalid partition ID %d (range: 0-%d)", partitionID, len(lb.partitions)-1)
 		return nil
 	}
 
 	partition := lb.partitions[partitionID]
 	if partition == nil {
+		log.Printf("LoadBalancer: No partition found for ID %d", partitionID)
 		return nil
 	}
 
+	log.Printf("LoadBalancer: Found partition %d with leader %s", partitionID, partition.Leader)
+
 	for _, node := range lb.nodes {
 		if node.Address == partition.Leader && node.Active {
+			log.Printf("LoadBalancer: Found active leader node %s for partition %d", node.Address, partitionID)
 			return node
 		}
 	}
+
+	log.Printf("LoadBalancer: No active leader found for partition %d", partitionID)
 	return nil
 }
 
@@ -144,22 +151,30 @@ func (lb *LoadBalancer) getReplicaForPartition(partitionID int) *Node {
 }
 
 func (lb *LoadBalancer) updateFromController() error {
+	log.Printf("LoadBalancer: Updating cluster state from controller at %s", lb.controllerURL)
+
 	req, err := http.NewRequest("GET", lb.controllerURL, nil)
 	if err != nil {
+		log.Printf("LoadBalancer: Failed to create request to controller: %v", err)
 		return fmt.Errorf("failed to create request: %v", err)
 	}
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		log.Printf("LoadBalancer: Failed to get cluster status from controller: %v", err)
 		return fmt.Errorf("failed to get cluster status: %v", err)
 	}
 	defer resp.Body.Close()
 
 	var controllerResp ControllerResponse
 	if err := json.NewDecoder(resp.Body).Decode(&controllerResp); err != nil {
+		log.Printf("LoadBalancer: Failed to decode controller response: %v", err)
 		return fmt.Errorf("failed to decode controller response: %v", err)
 	}
+
+	log.Printf("LoadBalancer: Received update from controller - Nodes: %d, Partitions: %d",
+		len(controllerResp.Nodes), len(controllerResp.Partitions))
 
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
@@ -167,6 +182,8 @@ func (lb *LoadBalancer) updateFromController() error {
 	// Update nodes
 	lb.nodes = make([]*Node, 0, len(controllerResp.Nodes))
 	for _, nodeInfo := range controllerResp.Nodes {
+		log.Printf("LoadBalancer: Updating node info - Address: %s, IsLeader: %v, Partitions: %v",
+			nodeInfo.Address, nodeInfo.IsLeader, nodeInfo.Partitions)
 		lb.nodes = append(lb.nodes, &Node{
 			Address:     nodeInfo.Address,
 			Active:      true,
@@ -179,42 +196,58 @@ func (lb *LoadBalancer) updateFromController() error {
 	// Update partitions
 	for i, partition := range controllerResp.Partitions {
 		if i < len(lb.partitions) {
+			log.Printf("LoadBalancer: Updating partition info - ID: %d, Leader: %s, Replicas: %v",
+				partition.ID, partition.Leader, partition.Replicas)
 			lb.partitions[i] = &partition
 		}
 	}
 
+	log.Printf("LoadBalancer: Successfully updated cluster state from controller")
 	return nil
 }
 
 func (lb *LoadBalancer) forwardRequest(w http.ResponseWriter, r *http.Request) {
-	var req KeyValueRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		response := KeyValueResponse{
-			Success: false,
-			Error:   "Invalid request body",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(response)
+	log.Printf("LoadBalancer: Received %s request to %s", r.Method, r.URL.Path)
+
+	// Read request body
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("LoadBalancer: Error reading request body: %v", err)
+		http.Error(w, "Error reading request body", http.StatusBadRequest)
 		return
 	}
+	defer r.Body.Close()
 
-	// Get partition for the key
-	partitionID := lb.partitionManager.GetPartition(req.Key)
+	// Parse JSON request
+	var kv struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(body, &kv); err != nil {
+		log.Printf("LoadBalancer: Error parsing JSON: %v", err)
+		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+		return
+	}
+	log.Printf("LoadBalancer: Request details - Key: %s, Value length: %d", kv.Key, len(kv.Value))
+
+	// Calculate partition ID
+	partitionID := lb.partitionManager.GetPartition(kv.Key)
+	log.Printf("LoadBalancer: Calculated partition ID %d for key %s", partitionID, kv.Key)
 
 	// Handle resharding if needed
 	if lb.partitionManager.IsResharding() {
 		oldPartition, _ := lb.partitionManager.GetOldAndNewPartitions(partitionID)
-		// During resharding, we need to handle both old and new partitions
-		// This is a simplified version - in production, you'd need to handle data migration
+		log.Printf("LoadBalancer: Resharding in progress. Old partition: %d, New partition: %d", oldPartition, partitionID)
 		partitionID = oldPartition
 	}
 
 	// Get the leader node for this partition
 	targetNode := lb.getLeaderForPartition(partitionID)
 	if targetNode == nil {
+		log.Printf("LoadBalancer: No leader found for partition %d, attempting to update from controller", partitionID)
 		// Try to update from controller and retry once
 		if err := lb.updateFromController(); err != nil {
+			log.Printf("LoadBalancer: Failed to update from controller: %v", err)
 			response := KeyValueResponse{
 				Success: false,
 				Error:   "No available nodes",
@@ -228,6 +261,7 @@ func (lb *LoadBalancer) forwardRequest(w http.ResponseWriter, r *http.Request) {
 		// Retry after update
 		targetNode = lb.getLeaderForPartition(partitionID)
 		if targetNode == nil {
+			log.Printf("LoadBalancer: Still no leader found for partition %d after controller update", partitionID)
 			response := KeyValueResponse{
 				Success: false,
 				Error:   "No available nodes after update",
@@ -238,23 +272,34 @@ func (lb *LoadBalancer) forwardRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	log.Printf("LoadBalancer: Selected target node %s for partition %d", targetNode.Address, partitionID)
 
 	// For read operations, we can use replicas if configured
 	if r.Method == http.MethodGet {
 		// Try to get a replica first
 		replicaNode := lb.getReplicaForPartition(partitionID)
 		if replicaNode != nil {
+			log.Printf("LoadBalancer: Using replica node %s for read operation", replicaNode.Address)
 			targetNode = replicaNode
 		}
 	}
 
 	// Forward the request to the target node
-	reqBody, _ := json.Marshal(req)
-	newReq, err := http.NewRequest(r.Method, targetNode.Address+r.URL.Path, bytes.NewBuffer(reqBody))
+	reqBody, _ := json.Marshal(kv)
+
+	// Construct full URL for the DB node endpoint
+	forwardURL := targetNode.Address + r.URL.Path
+	if !strings.HasPrefix(forwardURL, "http://") && !strings.HasPrefix(forwardURL, "https://") {
+		forwardURL = "http://" + forwardURL
+	}
+	log.Printf("LoadBalancer: Forwarding request to %s", forwardURL)
+
+	newReq, err := http.NewRequest(r.Method, forwardURL, bytes.NewBuffer(reqBody))
 	if err != nil {
+		log.Printf("LoadBalancer: Error creating request to forward to DB node %s: %v", targetNode.Address, err)
 		response := KeyValueResponse{
 			Success: false,
-			Error:   "Error creating request",
+			Error:   "Error creating forwarded request",
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -262,21 +307,31 @@ func (lb *LoadBalancer) forwardRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newReq.Header.Set("Content-Type", "application/json")
-	client := &http.Client{}
+	// Copy headers
+	for name, values := range r.Header {
+		for _, value := range values {
+			newReq.Header.Add(name, value)
+		}
+	}
+	// Add partition ID header
+	newReq.Header.Set("X-Partition-ID", strconv.Itoa(partitionID))
+
+	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(newReq)
 	if err != nil {
+		log.Printf("LoadBalancer: Error forwarding request to DB node %s: %v", targetNode.Address, err)
 		response := KeyValueResponse{
 			Success: false,
-			Error:   "Error forwarding request",
+			Error:   "Error forwarding request to backend service",
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusBadGateway)
 		json.NewEncoder(w).Encode(response)
 		return
 	}
 	defer resp.Body.Close()
 
+	log.Printf("LoadBalancer: Received response from DB node with status: %d", resp.StatusCode)
 	// Copy response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
