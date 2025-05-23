@@ -13,12 +13,6 @@ import (
 func main() {
 	cl := cluster.NewCluster()
 
-	cl.AddNode("NodeA", "http://localhost:9001")
-	cl.AddNode("NodeB", "http://localhost:9002")
-	cl.AddNode("NodeC", "http://localhost:9003")
-	cl.AddPartition() // will assign to NodeA by default
-	cl.AddPartition()
-
 	go cl.StartHealthChecks(5 * time.Second) // check every 5 seconds
 
 	tmpl := template.Must(template.ParseFiles("template/index.html")) // parsing the html file
@@ -29,6 +23,8 @@ func main() {
 	http.HandleFunc("/partition/remove", handlers.RemovePartitionHandler(cl))
 	http.HandleFunc("/partition/transfer", handlers.TransferPartitionHandler(cl))
 	http.HandleFunc("/partition/change-leader", handlers.ChangeLeaderHandler(cl))
+	http.HandleFunc("/partition/assign", handlers.AssignNodeToPartitionHandler(cl))
+	http.HandleFunc("/cluster/status", handlers.ClusterStatusHandler(cl))
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("./static"))))
 	log.Println("Starting controller server on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))

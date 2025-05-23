@@ -1,15 +1,17 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/mahdiXak47/key-value-distributed-system-database/load-balancer/distribution"
 )
 
 type Node struct {
@@ -27,13 +29,14 @@ type Partition struct {
 }
 
 type LoadBalancer struct {
-	nodes         []*Node
-	partitions    []*Partition
-	current       int
-	mu            sync.RWMutex
-	healthCheck   time.Duration
-	controllerURL string
-	numPartitions int
+	nodes            []*Node
+	partitions       map[int]*Partition
+	current          int
+	mu               sync.RWMutex
+	healthCheck      time.Duration
+	controllerURL    string
+	partitionManager *distribution.PartitionManager
+	usePartitioning  bool // New flag to control partitioning
 }
 
 type KeyValueRequest struct {
@@ -60,45 +63,17 @@ type ControllerResponse struct {
 
 func NewLoadBalancer(healthCheckInterval time.Duration, controllerURL string, numPartitions int) *LoadBalancer {
 	return &LoadBalancer{
-		nodes:         make([]*Node, 0),
-		partitions:    make([]*Partition, numPartitions),
-		healthCheck:   healthCheckInterval,
-		controllerURL: controllerURL,
-		numPartitions: numPartitions,
+		nodes:            make([]*Node, 0),
+		partitions:       make(map[int]*Partition),
+		healthCheck:      healthCheckInterval,
+		controllerURL:    controllerURL,
+		partitionManager: distribution.NewPartitionManager(numPartitions),
+		usePartitioning:  false, // Start with simple round-robin
 	}
 }
 
-func (lb *LoadBalancer) AddNode(address string) {
-	lb.mu.Lock()
-	defer lb.mu.Unlock()
-
-	// Check if node already exists
-	for _, node := range lb.nodes {
-		if node.Address == address {
-			return
-		}
-	}
-
-	lb.nodes = append(lb.nodes, &Node{
-		Address:     address,
-		Active:      true,
-		LastChecked: time.Now(),
-	})
-}
-
-func (lb *LoadBalancer) RemoveNode(address string) {
-	lb.mu.Lock()
-	defer lb.mu.Unlock()
-
-	for i, node := range lb.nodes {
-		if node.Address == address {
-			lb.nodes = append(lb.nodes[:i], lb.nodes[i+1:]...)
-			break
-		}
-	}
-}
-
-func (lb *LoadBalancer) getNextNode() *Node {
+// New method for round-robin node selection
+func (lb *LoadBalancer) getNextAvailableNode() *Node {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
 
@@ -106,23 +81,30 @@ func (lb *LoadBalancer) getNextNode() *Node {
 		return nil
 	}
 
-	// Round-robin selection
-	start := lb.current
-	for {
-		node := lb.nodes[lb.current]
-		lb.current = (lb.current + 1) % len(lb.nodes)
-		if node.Active {
-			return node
-		}
-		if lb.current == start {
-			return nil // No active nodes
+	// Try to find an active node starting from current
+	startIndex := lb.current
+	for i := 0; i < len(lb.nodes); i++ {
+		index := (startIndex + i) % len(lb.nodes)
+		if lb.nodes[index].Active {
+			lb.current = (index + 1) % len(lb.nodes)
+			return lb.nodes[index]
 		}
 	}
+
+	return nil
 }
 
 func (lb *LoadBalancer) checkNodeHealth(node *Node) bool {
-	resp, err := http.Get(node.Address + "/health")
+	// Fix URL formatting
+	healthURL := node.Address
+	if !strings.HasPrefix(healthURL, "http://") && !strings.HasPrefix(healthURL, "https://") {
+		healthURL = "http://" + healthURL
+	}
+	healthURL = fmt.Sprintf("%s/health", healthURL)
+
+	resp, err := http.Get(healthURL)
 	if err != nil {
+		log.Printf("Health check failed for node %s: %v", node.Address, err)
 		return false
 	}
 	defer resp.Body.Close()
@@ -135,9 +117,11 @@ func (lb *LoadBalancer) startHealthCheck() {
 		for range ticker.C {
 			lb.mu.Lock()
 			for _, node := range lb.nodes {
-				if time.Since(node.LastChecked) >= lb.healthCheck {
-					node.Active = lb.checkNodeHealth(node)
-					node.LastChecked = time.Now()
+				wasActive := node.Active
+				node.Active = lb.checkNodeHealth(node)
+				node.LastChecked = time.Now()
+				if wasActive != node.Active {
+					log.Printf("Node %s status changed: active=%v", node.Address, node.Active)
 				}
 			}
 			lb.mu.Unlock()
@@ -145,30 +129,28 @@ func (lb *LoadBalancer) startHealthCheck() {
 	}()
 }
 
-func (lb *LoadBalancer) getPartitionForKey(key string) int {
-	h := fnv.New32a()
-	h.Write([]byte(key))
-	return int(h.Sum32()) % lb.numPartitions
-}
-
 func (lb *LoadBalancer) getLeaderForPartition(partitionID int) *Node {
 	lb.mu.RLock()
 	defer lb.mu.RUnlock()
 
-	if partitionID < 0 || partitionID >= len(lb.partitions) {
+	log.Printf("LoadBalancer: Looking up leader for partition %d", partitionID)
+
+	partition, exists := lb.partitions[partitionID]
+	if !exists {
+		log.Printf("LoadBalancer: No partition found for ID %d", partitionID)
 		return nil
 	}
 
-	partition := lb.partitions[partitionID]
-	if partition == nil {
-		return nil
-	}
+	log.Printf("LoadBalancer: Found partition %d with leader %s", partitionID, partition.Leader)
 
 	for _, node := range lb.nodes {
 		if node.Address == partition.Leader && node.Active {
+			log.Printf("LoadBalancer: Found active leader node %s for partition %d", node.Address, partitionID)
 			return node
 		}
 	}
+
+	log.Printf("LoadBalancer: No active leader found for partition %d", partitionID)
 	return nil
 }
 
@@ -176,12 +158,8 @@ func (lb *LoadBalancer) getReplicaForPartition(partitionID int) *Node {
 	lb.mu.RLock()
 	defer lb.mu.RUnlock()
 
-	if partitionID < 0 || partitionID >= len(lb.partitions) {
-		return nil
-	}
-
-	partition := lb.partitions[partitionID]
-	if partition == nil || len(partition.Replicas) == 0 {
+	partition, exists := lb.partitions[partitionID]
+	if !exists || len(partition.Replicas) == 0 {
 		return nil
 	}
 
@@ -197,16 +175,30 @@ func (lb *LoadBalancer) getReplicaForPartition(partitionID int) *Node {
 }
 
 func (lb *LoadBalancer) updateFromController() error {
-	resp, err := http.Get(lb.controllerURL + "/cluster/status")
+	log.Printf("LoadBalancer: Updating cluster state from controller at %s", lb.controllerURL)
+
+	req, err := http.NewRequest("GET", lb.controllerURL, nil)
 	if err != nil {
+		log.Printf("LoadBalancer: Failed to create request to controller: %v", err)
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("LoadBalancer: Failed to get cluster status from controller: %v", err)
 		return fmt.Errorf("failed to get cluster status: %v", err)
 	}
 	defer resp.Body.Close()
 
 	var controllerResp ControllerResponse
 	if err := json.NewDecoder(resp.Body).Decode(&controllerResp); err != nil {
+		log.Printf("LoadBalancer: Failed to decode controller response: %v", err)
 		return fmt.Errorf("failed to decode controller response: %v", err)
 	}
+
+	log.Printf("LoadBalancer: Received update from controller - Nodes: %d, Partitions: %d",
+		len(controllerResp.Nodes), len(controllerResp.Partitions))
 
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
@@ -214,6 +206,8 @@ func (lb *LoadBalancer) updateFromController() error {
 	// Update nodes
 	lb.nodes = make([]*Node, 0, len(controllerResp.Nodes))
 	for _, nodeInfo := range controllerResp.Nodes {
+		log.Printf("LoadBalancer: Updating node info - Address: %s, IsLeader: %v, Partitions: %v",
+			nodeInfo.Address, nodeInfo.IsLeader, nodeInfo.Partitions)
 		lb.nodes = append(lb.nodes, &Node{
 			Address:     nodeInfo.Address,
 			Active:      true,
@@ -224,101 +218,215 @@ func (lb *LoadBalancer) updateFromController() error {
 	}
 
 	// Update partitions
-	for i, partition := range controllerResp.Partitions {
-		if i < len(lb.partitions) {
-			lb.partitions[i] = &partition
+	lb.partitions = make(map[int]*Partition)
+	for _, p := range controllerResp.Partitions {
+		log.Printf("LoadBalancer: Updating partition info - ID: %d, Leader: %s, Replicas: %v",
+			p.ID, p.Leader, p.Replicas)
+		// Create a new partition to avoid the loop variable issue
+		partition := Partition{
+			ID:       p.ID,
+			Leader:   p.Leader,
+			Replicas: p.Replicas,
 		}
+		lb.partitions[p.ID] = &partition
 	}
 
+	log.Printf("LoadBalancer: Successfully updated cluster state from controller")
 	return nil
 }
 
 func (lb *LoadBalancer) forwardRequest(w http.ResponseWriter, r *http.Request) {
-	var req KeyValueRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	partitionID := lb.getPartitionForKey(req.Key)
 	var targetNode *Node
+	var key string
 
-	// For GET requests, try replicas first, then leader
-	if r.Method == http.MethodGet {
-		targetNode = lb.getReplicaForPartition(partitionID)
-		if targetNode == nil {
-			targetNode = lb.getLeaderForPartition(partitionID)
-		}
-	} else {
-		// For SET and DELETE, use leader
-		targetNode = lb.getLeaderForPartition(partitionID)
-	}
-
-	if targetNode == nil {
-		// Try to update from controller and retry once
-		if err := lb.updateFromController(); err != nil {
-			http.Error(w, "No available nodes", http.StatusServiceUnavailable)
-			return
-		}
-
-		// Retry after update
-		if r.Method == http.MethodGet {
-			targetNode = lb.getReplicaForPartition(partitionID)
-			if targetNode == nil {
-				targetNode = lb.getLeaderForPartition(partitionID)
+	if r.Method == "GET" {
+		// For GET requests, get key from query parameters
+		key = r.URL.Query().Get("key")
+		if key == "" {
+			log.Printf("LoadBalancer: No key provided in query parameters")
+			response := KeyValueResponse{
+				Success: false,
+				Error:   "Key is required",
 			}
-		} else {
-			targetNode = lb.getLeaderForPartition(partitionID)
-		}
-
-		if targetNode == nil {
-			http.Error(w, "No available nodes after update", http.StatusServiceUnavailable)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(response)
 			return
 		}
+		log.Printf("LoadBalancer: Received GET request for key: %s", key)
+	} else {
+		// For POST/DELETE requests, read from body
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			log.Printf("LoadBalancer: Error reading request body: %v", err)
+			response := KeyValueResponse{
+				Success: false,
+				Error:   "Error reading request",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+		r.Body.Close()
+
+		var kv KeyValueRequest
+		if err := json.Unmarshal(body, &kv); err != nil {
+			log.Printf("LoadBalancer: Error parsing JSON: %v", err)
+			response := KeyValueResponse{
+				Success: false,
+				Error:   "Invalid JSON format",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+		key = kv.Key
+		log.Printf("LoadBalancer: Received %s request for key: %s", r.Method, key)
 	}
 
-	// Forward the request to the target node
-	reqBody, _ := json.Marshal(req)
-	newReq, err := http.NewRequest(r.Method, targetNode.Address+r.URL.Path, bytes.NewBuffer(reqBody))
-	if err != nil {
-		http.Error(w, "Error creating request", http.StatusInternalServerError)
+	// Get partition ID for the key
+	partitionID := 1 // For now, use partition 1 for all keys
+	log.Printf("LoadBalancer: Using partition %d for key %s", partitionID, key)
+
+	// Get leader node for the partition
+	targetNode = lb.getLeaderForPartition(partitionID)
+	if targetNode == nil {
+		log.Printf("LoadBalancer: No leader found for partition %d", partitionID)
+		response := KeyValueResponse{
+			Success: false,
+			Error:   fmt.Sprintf("No leader found for partition %d", partitionID),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 
+	log.Printf("LoadBalancer: Forwarding request to node %s", targetNode.Address)
+
+	// Create new request to forward - handle URL properly
+	nodeAddr := targetNode.Address
+	if !strings.HasPrefix(nodeAddr, "http://") && !strings.HasPrefix(nodeAddr, "https://") {
+		nodeAddr = "http://" + nodeAddr
+	}
+
+	var newReq *http.Request
+	var err error
+
+	if r.Method == "GET" {
+		// For GET requests, forward with query parameters
+		url := fmt.Sprintf("%s%s?key=%s", nodeAddr, r.URL.Path, key)
+		newReq, err = http.NewRequest(r.Method, url, nil)
+	} else {
+		// For POST/DELETE requests, forward with body
+		url := fmt.Sprintf("%s%s", nodeAddr, r.URL.Path)
+		newReq, err = http.NewRequest(r.Method, url, r.Body)
+	}
+
+	if err != nil {
+		log.Printf("LoadBalancer: Error creating forward request: %v", err)
+		response := KeyValueResponse{
+			Success: false,
+			Error:   "Error creating forward request",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Copy headers from original request
+	for name, values := range r.Header {
+		for _, value := range values {
+			newReq.Header.Add(name, value)
+		}
+	}
+
+	// Add partition ID header
+	newReq.Header.Set("X-Partition-ID", strconv.Itoa(partitionID))
 	newReq.Header.Set("Content-Type", "application/json")
-	client := &http.Client{}
+
+	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(newReq)
 	if err != nil {
-		// If request fails, try to update from controller and retry once
-		if err := lb.updateFromController(); err != nil {
-			http.Error(w, "Error forwarding request", http.StatusInternalServerError)
-			return
+		log.Printf("LoadBalancer: Error forwarding request: %v", err)
+		response := KeyValueResponse{
+			Success: false,
+			Error:   "Error forwarding request to node",
 		}
-
-		// Retry the request
-		resp, err = client.Do(newReq)
-		if err != nil {
-			http.Error(w, "Error forwarding request after retry", http.StatusInternalServerError)
-			return
-		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(response)
+		return
 	}
 	defer resp.Body.Close()
 
-	// Copy response
+	// Read the response body
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("LoadBalancer: Error reading response body: %v", err)
+		response := KeyValueResponse{
+			Success: false,
+			Error:   "Error reading response from node",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Try to parse the response as JSON
+	var nodeResponse KeyValueResponse
+	if err := json.Unmarshal(respBody, &nodeResponse); err != nil {
+		// If we can't parse the response as JSON, wrap the raw response in our format
+		log.Printf("LoadBalancer: Error parsing node response as JSON: %v", err)
+		nodeResponse = KeyValueResponse{
+			Success: resp.StatusCode >= 200 && resp.StatusCode < 300,
+			Value:   string(respBody),
+		}
+		if !nodeResponse.Success {
+			nodeResponse.Error = string(respBody)
+		}
+	}
+
+	// Send the response back to the client
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	json.NewEncoder(w).Encode(nodeResponse)
+}
+
+// Handle partition resizing
+func (lb *LoadBalancer) handlePartitionResize(newNumPartitions int) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+
+	// Start resharding process
+	lb.partitionManager.StartResharding(newNumPartitions)
+
+	// Update partitions array
+	newPartitions := make(map[int]*Partition)
+	for _, partition := range lb.partitions {
+		newPartitions[partition.ID] = partition
+	}
+	lb.partitions = newPartitions
+
+	// In a real implementation, you would:
+	// 1. Start data migration from old partitions to new ones
+	// 2. Update routing tables
+	// 3. Complete resharding when migration is done
 }
 
 func main() {
-	lb := NewLoadBalancer(5*time.Second, "http://localhost:8080", 10) // 10 partitions
+	lb := NewLoadBalancer(5*time.Second, "http://localhost:8080/cluster/status", 10)
 
 	// Start health check
 	lb.startHealthCheck()
 
 	// Start periodic controller updates
 	go func() {
-		ticker := time.NewTicker(10 * time.Second)
+		ticker := time.NewTicker(5 * time.Second)
 		for range ticker.C {
 			if err := lb.updateFromController(); err != nil {
 				log.Printf("Failed to update from controller: %v", err)
@@ -331,35 +439,6 @@ func main() {
 	http.HandleFunc("/get", lb.forwardRequest)
 	http.HandleFunc("/delete", lb.forwardRequest)
 
-	// Handle node management
-	http.HandleFunc("/node/add", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		address := r.FormValue("address")
-		if address != "" {
-			lb.AddNode(address)
-			w.WriteHeader(http.StatusOK)
-		} else {
-			http.Error(w, "Address is required", http.StatusBadRequest)
-		}
-	})
-
-	http.HandleFunc("/node/remove", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		address := r.FormValue("address")
-		if address != "" {
-			lb.RemoveNode(address)
-			w.WriteHeader(http.StatusOK)
-		} else {
-			http.Error(w, "Address is required", http.StatusBadRequest)
-		}
-	})
-
-	log.Println("Starting load balancer on :8081")
+	log.Printf("Starting load balancer on :8081")
 	log.Fatal(http.ListenAndServe(":8081", nil))
 }

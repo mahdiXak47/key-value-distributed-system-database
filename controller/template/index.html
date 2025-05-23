@@ -3,67 +3,539 @@
 <head>
     <title>Key-Value Cluster Controller</title>
     <link rel="stylesheet" href="/static/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        .notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 15px 25px;
+            background-color: #4CAF50;
+            color: white;
+            border-radius: 4px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            display: none;
+            z-index: 1000;
+            animation: slideIn 0.5s ease-out;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+
+        @keyframes fadeOut {
+            from {
+                opacity: 1;
+            }
+            to {
+                opacity: 0;
+            }
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+        }
+
+        .modal-content {
+            background-color: #fff;
+            margin: 15% auto;
+            padding: 20px;
+            border-radius: 8px;
+            width: 80%;
+            max-width: 500px;
+        }
+
+        .close {
+            float: right;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+        }
+
+        .form-group select {
+            width: 100%;
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+
+        .partition-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .btn-danger {
+            background-color: #f44336;
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .node-select {
+            width: 100%;
+            padding: 8px;
+            margin: 8px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+
+        .action-buttons {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .leader-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 8px;
+            background-color: #e3f2fd;
+            border-radius: 4px;
+            color: #1976d2;
+        }
+
+        .leader-badge.leader-down {
+            background-color: #ffebee;
+            color: #d32f2f;
+        }
+
+        .replica-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 8px;
+            background-color: #f5f5f5;
+            border-radius: 4px;
+            margin-right: 4px;
+            margin-bottom: 4px;
+        }
+
+        /* Additional styles for better table layout */
+        .table-container {
+            overflow-x: auto;
+            margin-top: 1rem;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+
+        th {
+            background-color: #f8f9fa;
+            font-weight: 600;
+        }
+
+        .partition-id, .node-id {
+            font-family: monospace;
+            color: #666;
+        }
+    </style>
 </head>
 <body>
-    <h1>Cluster Controller Dashboard</h1>
+    <div id="notification" class="notification">
+        <i class="fas fa-check-circle"></i>
+        <span id="notification-message"></span>
+    </div>
+    <div class="container">
+        <header>
+            <div class="header-content">
+                <h1><i class="fas fa-database"></i> Cluster Controller Dashboard</h1>
+                <div class="cluster-stats">
+                    <div class="stat-card">
+                        <i class="fas fa-server"></i>
+                        <span class="stat-value">{{len .Nodes}}</span>
+                        <span class="stat-label">Active Nodes</span>
+                    </div>
+                    <div class="stat-card">
+                        <i class="fas fa-layer-group"></i>
+                        <span class="stat-value">{{len .Partitions}}</span>
+                        <span class="stat-label">Partitions</span>
+                    </div>
+                </div>
+            </div>
+        </header>
 
-    <h2>Nodes</h2>
-    <table border="1" cellpadding="5">
-        <tr><th>ID</th><th>Name</th><th>Address</th><th>Status</th><th>Action</th></tr>
-        {{range .Nodes}}
-        <tr>
-            <td>{{.ID}}</td>
-            <td>{{.Name}}</td>
-            <td>{{.Address}}</td>
-            <td>{{if .Active}}Up{{else}}Down{{end}}</td>
-            <td>
-                <form method="POST" action="/node/remove">
-                    <input type="hidden" name="id" value="{{.ID}}">
-                    <button type="submit">Remove</button>
-                </form>
-            </td>
-        </tr>
-        {{end}}
-    </table>
+        <div class="dashboard-grid">
+            <!-- Left Column: Node Management -->
+            <div class="dashboard-column">
+                <div class="card">
+                    <div class="card-header">
+                        <h2><i class="fas fa-server"></i> Nodes</h2>
+                        <button class="btn-icon" onclick="toggleAddNode()">
+                            <i class="fas fa-plus"></i>
+                        </button>
+                    </div>
 
-    <h3>Add Node</h3>
-    <form method="POST" action="/node/add">
-        Name: <input name="name" required>
-        Address: <input name="address" required>
-        <button type="submit">Add Node</button>
-    </form>
+                    <div class="add-node-form" id="addNodeForm" style="display: none;">
+                        <form method="POST" action="/node/add" class="add-form">
+                            <div class="form-group">
+                                <label for="node-name"><i class="fas fa-tag"></i> Name:</label>
+                                <input id="node-name" name="name" required placeholder="Enter node name">
+                            </div>
+                            <div class="form-group">
+                                <label for="node-address"><i class="fas fa-network-wired"></i> Address:</label>
+                                <input id="node-address" name="address" required placeholder="http://localhost:9001">
+                            </div>
+                            <button type="submit" class="btn-primary">
+                                <i class="fas fa-plus"></i> Add Node
+                            </button>
+                        </form>
+                    </div>
 
-    <h2>Partitions</h2>
-    <table border="1" cellpadding="5">
-        <tr><th>ID</th><th>Leader</th><th>Replicas</th><th>Actions</th></tr>
-        {{range .Partitions}}
-        <tr>
-            <td>{{.ID}}</td>
-            <td>{{.LeaderName}}</td>
-            <td>{{range .Replicas}}{{.}} {{end}}</td>
-            <td>
-                <form method="POST" action="/partition/remove">
-                    <input type="hidden" name="id" value="{{.ID}}">
-                    <button type="submit">Remove</button>
-                </form>
-                <form method="POST" action="/partition/change-leader">
-                    <input type="hidden" name="id" value="{{.ID}}">
-                    New Leader ID: <input name="newLeaderID" type="number" required>
-                    <button type="submit">Change Leader</button>
-                </form>
-                <form method="POST" action="/partition/transfer">
-                    <input type="hidden" name="id" value="{{.ID}}">
-                    New Node ID: <input name="newNodeID" type="number" required>
-                    <button type="submit">Transfer</button>
-                </form>
-            </td>
-        </tr>
-        {{end}}
-    </table>
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Name</th>
+                                    <th>Address</th>
+                                    <th>Status</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {{range .Nodes}}
+                                <tr>
+                                    <td><span class="node-id">#{{.ID}}</span></td>
+                                    <td><span class="node-name">{{.Name}}</span></td>
+                                    <td><span class="node-address">{{.Address}}</span></td>
+                                    <td>
+                                        <span class="status-badge {{if .Active}}status-up{{else}}status-down{{end}}">
+                                            <i class="fas {{if .Active}}fa-check-circle{{else}}fa-times-circle{{end}}"></i>
+                                            {{if .Active}}Up{{else}}Down{{end}}
+                                        </span>
+                                        {{if not .Active}}
+                                        <span class="status-warning">
+                                            <i class="fas fa-exclamation-triangle"></i> Node is down
+                                        </span>
+                                        {{end}}
+                                    </td>
+                                    <td>
+                                        <form method="POST" action="/node/remove" class="action-form">
+                                            <input type="hidden" name="id" value="{{.ID}}">
+                                            <button type="submit" class="btn-danger">
+                                                <i class="fas fa-trash"></i>
+                                            </button>
+                                        </form>
+                                    </td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
 
-    <h3>Add Partition</h3>
-    <form method="POST" action="/partition/add">
-        <button type="submit">Add Partition</button>
-    </form>
+            <!-- Right Column: Partition Management -->
+            <div class="dashboard-column">
+                <div class="card">
+                    <div class="card-header">
+                        <h2><i class="fas fa-layer-group"></i> Partitions</h2>
+                        <form method="POST" action="/partition/add" class="add-form" id="addPartitionForm">
+                            <button type="submit" class="btn-primary">
+                                <i class="fas fa-plus"></i> Add Partition
+                            </button>
+                        </form>
+                    </div>
+
+                    <div class="card-body">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Leader</th>
+                                    <th>Replicas</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {{range .Partitions}}
+                                <tr>
+                                    <td><span class="partition-id">#{{.ID}}</span></td>
+                                    <td>
+                                        {{if .LeaderName}}
+                                            <span class="leader-badge">
+                                                <i class="fas fa-crown"></i> {{.LeaderName}}
+                                            </span>
+                                        {{else}}
+                                            <span class="leader-badge leader-down">
+                                                <i class="fas fa-exclamation-circle"></i> No Leader
+                                            </span>
+                                        {{end}}
+                                    </td>
+                                    <td>
+                                        <div class="replica-list">
+                                            {{range .Replicas}}
+                                                <span class="replica-badge">{{.}}</span>
+                                            {{end}}
+                                        </div>
+                                    </td>
+                                    <td class="partition-actions">
+                                        <div class="action-buttons">
+                                            <button class="btn-primary" onclick="openAssignNodeModal('{{.ID}}')" title="Assign Node">
+                                                <i class="fas fa-user-plus"></i> Assign Node
+                                            </button>
+                                            <button class="btn-danger" onclick="removePartition('{{.ID}}')" title="Remove Partition">
+                                                <i class="fas fa-trash"></i>
+                                            </button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Node Assignment Modal -->
+    <div id="assignNodeModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal()">&times;</span>
+            <h2>Assign Node to Partition</h2>
+            <form id="assignNodeForm">
+                <input type="hidden" id="partitionId" name="partitionId">
+                <div class="form-group">
+                    <label for="nodeSelect">Select Node:</label>
+                    <select id="nodeSelect" name="nodeId" required>
+                        <!-- Will be populated dynamically -->
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="roleSelect">Role:</label>
+                    <select id="roleSelect" name="role" required>
+                        <option value="leader">Leader</option>
+                        <option value="replica">Replica</option>
+                    </select>
+                </div>
+                <button type="submit" class="btn-primary">Assign Node</button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        function showNotification(message, isSuccess = true) {
+            const notification = document.getElementById('notification');
+            const messageEl = document.getElementById('notification-message');
+            messageEl.textContent = message;
+            notification.style.backgroundColor = isSuccess ? '#4CAF50' : '#f44336';
+            notification.style.display = 'block';
+            setTimeout(() => {
+                notification.style.animation = 'fadeOut 0.5s ease-out';
+                setTimeout(() => {
+                    notification.style.display = 'none';
+                    notification.style.animation = '';
+                }, 500);
+            }, 3000);
+        }
+
+        function toggleAddNode() {
+            const form = document.getElementById('addNodeForm');
+            form.style.display = form.style.display === 'none' ? 'block' : 'none';
+        }
+
+        function toggleLeaderForm(id) {
+            const form = document.getElementById('leaderForm' + id);
+            form.style.display = form.style.display === 'none' ? 'block' : 'none';
+        }
+
+        function toggleTransferForm(id) {
+            const form = document.getElementById('transferForm' + id);
+            form.style.display = form.style.display === 'none' ? 'block' : 'none';
+        }
+
+        // Modal functions
+        function openAssignNodeModal(partitionId) {
+            const modal = document.getElementById('assignNodeModal');
+            document.getElementById('partitionId').value = partitionId;
+            
+            // Populate node select
+            const nodeSelect = document.getElementById('nodeSelect');
+            nodeSelect.innerHTML = '';
+            
+            // Get all nodes from the table
+            const nodeRows = document.querySelectorAll('tr');
+            nodeRows.forEach(row => {
+                const idCell = row.querySelector('.node-id');
+                const nameCell = row.querySelector('.node-name');
+                if (idCell && nameCell) {
+                    const option = document.createElement('option');
+                    option.value = idCell.textContent.replace('#', '').trim();
+                    option.textContent = nameCell.textContent.trim();
+                    nodeSelect.appendChild(option);
+                }
+            });
+            
+            modal.style.display = 'block';
+        }
+
+        function closeModal() {
+            document.getElementById('assignNodeModal').style.display = 'none';
+        }
+
+        // Handle node assignment form submission
+        document.getElementById('assignNodeForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const partitionId = document.getElementById('partitionId').value;
+            const nodeId = document.getElementById('nodeSelect').value;
+            const role = document.getElementById('roleSelect').value;
+            
+            try {
+                const response = await fetch('/partition/assign', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        partitionId: parseInt(partitionId),
+                        nodeId: parseInt(nodeId),
+                        role: role
+                    })
+                });
+                
+                if (response.ok) {
+                    showNotification('Node assigned successfully');
+                    closeModal();
+                    location.reload(); // Refresh to see changes
+                } else {
+                    const error = await response.text();
+                    showNotification(error, false);
+                }
+            } catch (error) {
+                showNotification('Error assigning node: ' + error, false);
+            }
+        });
+
+        function removePartition(partitionId) {
+            if (confirm('Are you sure you want to remove this partition?')) {
+                fetch('/partition/remove', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ id: partitionId })
+                })
+                .then(response => {
+                    if (response.ok) {
+                        showNotification('Partition removed successfully');
+                        location.reload();
+                    } else {
+                        showNotification('Error removing partition', false);
+                    }
+                })
+                .catch(error => {
+                    showNotification('Error: ' + error, false);
+                });
+            }
+        }
+
+        // Handle node form submission
+        document.querySelector('form[action="/node/add"]').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            // Get form values
+            const name = document.getElementById('node-name').value.trim();
+            const address = document.getElementById('node-address').value.trim();
+            
+            // Validate input
+            if (!name || !address) {
+                showNotification('Name and address are required', false);
+                return;
+            }
+            
+            try {
+                const response = await fetch('/node/add', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `name=${encodeURIComponent(name)}&address=${encodeURIComponent(address)}`
+                });
+                
+                const text = await response.text();
+                
+                if (response.ok) {
+                    showNotification('Node added successfully');
+                    location.reload();
+                } else {
+                    showNotification(text, false);
+                }
+            } catch (error) {
+                showNotification('Error adding node: ' + error.message, false);
+            }
+        });
+
+        // Handle partition form submission
+        document.getElementById('addPartitionForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            try {
+                const response = await fetch('/partition/add', {
+                    method: 'POST'
+                });
+                
+                if (response.ok) {
+                    showNotification('Partition added successfully');
+                    setTimeout(() => {
+                        location.reload();
+                    }, 1000);
+                } else {
+                    const error = await response.text();
+                    showNotification(error, false);
+                }
+            } catch (error) {
+                showNotification('Error adding partition: ' + error.message, false);
+            }
+        });
+    </script>
 </body>
 </html>
