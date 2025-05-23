@@ -3,6 +3,27 @@
 <head>
     <title>Key-Value Store Client</title>
     <link rel="stylesheet" href="/static/style.css">
+    <style>
+        .notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 15px;
+            background-color: #4CAF50;
+            color: white;
+            border-radius: 4px;
+            display: none;
+            z-index: 1000;
+            animation: fadeInOut 3s ease-in-out;
+        }
+
+        @keyframes fadeInOut {
+            0% { opacity: 0; }
+            10% { opacity: 1; }
+            90% { opacity: 1; }
+            100% { opacity: 0; }
+        }
+    </style>
 </head>
 <body>
     <div class="container">
@@ -13,6 +34,9 @@
             <button onclick="showForm('get')" class="op-btn">Get</button>
             <button onclick="showForm('delete')" class="op-btn">Delete</button>
         </div>
+
+        <!-- Notification Element -->
+        <div id="notification" class="notification"></div>
 
         <!-- Set Form -->
         <div id="set-form" class="operation-form" style="display: none;">
@@ -71,6 +95,17 @@
         let lastOperation = null;
         let lastFormData = null;
 
+        function showNotification(message) {
+            const notification = document.getElementById('notification');
+            notification.textContent = message;
+            notification.style.display = 'block';
+            
+            // Hide notification after 3 seconds
+            setTimeout(() => {
+                notification.style.display = 'none';
+            }, 3000);
+        }
+
         function showForm(operation) {
             // Hide all forms
             document.querySelectorAll('.operation-form').forEach(form => {
@@ -98,14 +133,25 @@
             console.log(`[Debug] Form data:`, data);
 
             try {
-                console.log(`[Debug] Making request to /${operation}`);
-                const response = await fetch(`/${operation}`, {
-                    method: 'POST',
+                let url = `/${operation}`;
+                let options = {
                     headers: {
                         'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify(data)
-                });
+                    }
+                };
+
+                if (operation === 'get') {
+                    // For GET requests, use query parameters
+                    url = `/${operation}?key=${encodeURIComponent(data.key)}`;
+                    options.method = 'GET';
+                } else {
+                    // For POST and DELETE operations
+                    options.method = 'POST';
+                    options.body = JSON.stringify(data);
+                }
+
+                console.log(`[Debug] Making ${options.method} request to ${url}`);
+                const response = await fetch(url, options);
 
                 console.log(`[Debug] Response status:`, response.status);
                 const result = await response.json();

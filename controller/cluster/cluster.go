@@ -268,6 +268,20 @@ func (c *Cluster) AddPartition() error {
 	log.Printf("Cluster: Adding new partition")
 
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Check if there are any active nodes first
+	activeNodes := 0
+	for _, node := range c.nodes {
+		if node.Active {
+			activeNodes++
+		}
+	}
+
+	if activeNodes == 0 {
+		return fmt.Errorf("no active nodes available to assign partition")
+	}
+
 	// Create new partition
 	c.nextPartID++
 	partID := c.nextPartID
@@ -279,16 +293,39 @@ func (c *Cluster) AddPartition() error {
 
 	log.Printf("Cluster: Created new partition with ID: %d", partID)
 	c.partitions[partID] = partition
-	c.mu.Unlock() // Release lock before node assignment
 
-	// Assign partition to nodes
-	if len(c.nodes) > 0 {
-		log.Printf("Cluster: Assigning partition %d to nodes", partID)
-		c.assignPartition(partID)
-	} else {
-		log.Printf("Cluster: Warning - No nodes available to assign partition %d", partID)
+	// Get available nodes
+	availableNodes := make([]int, 0)
+	for nodeID, node := range c.nodes {
+		if node.Active {
+			availableNodes = append(availableNodes, nodeID)
+		}
 	}
 
+	// Select leader
+	leaderID := availableNodes[0]
+	leaderNode := c.nodes[leaderID]
+	partition.LeaderID = leaderID
+	c.nodes[leaderID].Partitions = append(c.nodes[leaderID].Partitions, partID)
+
+	// Prepare notification info
+	leaderInfo := NodePartitionInfo{
+		ID:       partID,
+		Role:     "leader",
+		Leader:   leaderNode.Address,
+		Replicas: []string{},
+	}
+
+	// Release lock before making network calls
+	c.mu.Unlock()
+
+	// Notify leader about assignment
+	if err := c.notifyNode(leaderNode.Address, leaderInfo); err != nil {
+		log.Printf("Cluster: Error notifying leader %s about partition %d: %v", leaderNode.Address, partID, err)
+		// Even if notification fails, we keep the partition created
+	}
+
+	c.mu.Lock() // Re-acquire lock
 	log.Printf("Cluster: Successfully added partition %d", partID)
 	return nil
 }
@@ -581,23 +618,20 @@ func (c *Cluster) TransferPartition(pid, newNodeID int) {
 	}
 }
 
-func (c *Cluster) ChangeLeader(pid, newLeaderID int) {
+func (c *Cluster) ChangeLeader(pid, newLeaderID int) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	part, okPart := c.partitions[pid]
 	if !okPart {
-		log.Printf("ChangeLeader: Partition %d not found.", pid)
-		return
+		return fmt.Errorf("partition %d not found", pid)
 	}
 	newNode, okNode := c.nodes[newLeaderID]
 	if !okNode {
-		log.Printf("ChangeLeader: New leader node %d not found.", newLeaderID)
-		return
+		return fmt.Errorf("new leader node %d not found", newLeaderID)
 	}
 	if !newNode.Active {
-		log.Printf("ChangeLeader: New leader node %d is not active.", newLeaderID)
-		return
+		return fmt.Errorf("new leader node %d is not active", newLeaderID)
 	}
 
 	// Update internal state
@@ -623,16 +657,14 @@ func (c *Cluster) ChangeLeader(pid, newLeaderID int) {
 	currentNodes := c.GetNodes()
 	currentPartition, pExists := c.GetPartitions()[pid]
 	if !pExists {
-		log.Printf("ChangeLeader: Partition %d disappeared before notification.", pid)
-		return
+		return fmt.Errorf("partition %d disappeared before notification", pid)
 	}
 
 	leaderAddress := ""
 	if lNode, exists := currentNodes[currentPartition.LeaderID]; exists {
 		leaderAddress = lNode.Address
 	} else {
-		log.Printf("ChangeLeader: Critical - Leader node %d (address) not found for partition %d during notification.", currentPartition.LeaderID, pid)
-		return
+		return fmt.Errorf("leader node %d (address) not found for partition %d during notification", currentPartition.LeaderID, pid)
 	}
 
 	allReplicaNodeAddresses := []string{}
@@ -664,13 +696,31 @@ func (c *Cluster) ChangeLeader(pid, newLeaderID int) {
 		nodesToNotify[addr] = info
 	}
 
+	// Use a WaitGroup to wait for all notifications to complete
+	var wg sync.WaitGroup
+	var notifyError error
+	var notifyErrorMu sync.Mutex
+
 	for nodeAddr, assignmentInfo := range nodesToNotify {
+		wg.Add(1)
 		go func(addr string, pInfo NodePartitionInfo) {
+			defer wg.Done()
 			if err := c.notifyNode(addr, pInfo); err != nil {
 				log.Printf("ChangeLeader: Failed to notify node %s about partition %d change: %v", addr, pInfo.ID, err)
+				notifyErrorMu.Lock()
+				notifyError = err
+				notifyErrorMu.Unlock()
 			}
 		}(nodeAddr, assignmentInfo)
 	}
+
+	wg.Wait()
+
+	if notifyError != nil {
+		return fmt.Errorf("failed to notify one or more nodes about leader change: %v", notifyError)
+	}
+
+	return nil
 }
 
 func (c *Cluster) GetNodes() map[int]*Node {
@@ -735,5 +785,77 @@ func (c *Cluster) notifyNode(nodeAddress string, partInfo NodePartitionInfo) err
 	}
 
 	log.Printf("Successfully notified node %s about partition %d (Role: %s, Leader: %s)", nodeAddress, partInfo.ID, partInfo.Role, partInfo.Leader)
+	return nil
+}
+
+// AddReplica adds a node as a replica to a partition
+func (c *Cluster) AddReplica(partitionID, nodeID int) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Validate partition exists
+	partition, exists := c.partitions[partitionID]
+	if !exists {
+		return fmt.Errorf("partition %d does not exist", partitionID)
+	}
+
+	// Validate node exists
+	node, exists := c.nodes[nodeID]
+	if !exists {
+		return fmt.Errorf("node %d does not exist", nodeID)
+	}
+
+	// Check if node is already a replica
+	for _, replicaID := range partition.Replicas {
+		if replicaID == nodeID {
+			return fmt.Errorf("node %d is already a replica of partition %d", nodeID, partitionID)
+		}
+	}
+
+	// Add node as replica
+	partition.Replicas = append(partition.Replicas, nodeID)
+	node.Partitions = append(node.Partitions, partitionID)
+
+	// Get current nodes view for notification
+	currentNodes := c.GetNodes()
+	leaderAddress := ""
+	if leader, ok := currentNodes[partition.LeaderID]; ok {
+		leaderAddress = leader.Address
+	}
+
+	// Get replica addresses
+	replicaAddresses := make([]string, 0)
+	for _, replicaID := range partition.Replicas {
+		if replica, ok := currentNodes[replicaID]; ok {
+			replicaAddresses = append(replicaAddresses, replica.Address)
+		}
+	}
+
+	// Notify the new replica
+	info := NodePartitionInfo{
+		ID:       partitionID,
+		Role:     "replica",
+		Leader:   leaderAddress,
+		Replicas: replicaAddresses,
+	}
+	if err := c.notifyNode(node.Address, info); err != nil {
+		log.Printf("Failed to notify new replica %s about partition %d: %v", node.Address, partitionID, err)
+		// Don't return error, as the replica is already added to the partition
+	}
+
+	// Notify the leader about the new replica
+	if leader, ok := currentNodes[partition.LeaderID]; ok {
+		leaderInfo := NodePartitionInfo{
+			ID:       partitionID,
+			Role:     "leader",
+			Leader:   leaderAddress,
+			Replicas: replicaAddresses,
+		}
+		if err := c.notifyNode(leader.Address, leaderInfo); err != nil {
+			log.Printf("Failed to notify leader %s about new replica for partition %d: %v", leader.Address, partitionID, err)
+			// Don't return error, as the replica is already added to the partition
+		}
+	}
+
 	return nil
 }

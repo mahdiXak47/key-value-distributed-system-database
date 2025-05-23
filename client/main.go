@@ -28,12 +28,22 @@ type KeyValueResponse struct {
 }
 
 func makeRequest(method, endpoint string, data KeyValueRequest) (*KeyValueResponse, error) {
-	jsonData, err := json.Marshal(data)
-	if err != nil {
-		return nil, fmt.Errorf("error marshaling request: %v", err)
+	var req *http.Request
+	var err error
+
+	if method == "GET" {
+		// For GET requests, append key as query parameter
+		url := fmt.Sprintf("%s%s?key=%s", baseURL, endpoint, data.Key)
+		req, err = http.NewRequest(method, url, nil)
+	} else {
+		// For other methods, send data in body
+		jsonData, err := json.Marshal(data)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling request: %v", err)
+		}
+		req, err = http.NewRequest(method, baseURL+endpoint, bytes.NewBuffer(jsonData))
 	}
 
-	req, err := http.NewRequest(method, baseURL+endpoint, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("error creating request: %v", err)
 	}
@@ -120,25 +130,22 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGet(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
+	if r.Method != "GET" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Parse JSON request
-	var requestData struct {
-		Key string `json:"key"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&requestData); err != nil {
-		log.Printf("[Client] Error decoding request: %v", err)
-		http.Error(w, "Invalid request format", http.StatusBadRequest)
+	// Get key from query parameter
+	key := r.URL.Query().Get("key")
+	if key == "" {
+		log.Printf("[Client] No key provided in query parameters")
+		http.Error(w, "Key is required", http.StatusBadRequest)
 		return
 	}
 
-	log.Printf("[Client] Received get request - Key: %s", requestData.Key)
+	log.Printf("[Client] Received get request - Key: %s", key)
 
-	response, err := makeRequest("GET", "/get", KeyValueRequest{Key: requestData.Key})
+	response, err := makeRequest("GET", "/get", KeyValueRequest{Key: key})
 	if err != nil {
 		log.Printf("[Client] Error sending request: %v", err)
 		response = &KeyValueResponse{
@@ -148,7 +155,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if response.Success {
-		response.Value = fmt.Sprintf("Value for key '%s': %s", requestData.Key, response.Value)
+		response.Value = fmt.Sprintf("Value for key '%s': %s", key, response.Value)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)

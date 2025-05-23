@@ -151,14 +151,25 @@ func AddNodeHandler(cl *cluster.Cluster) http.HandlerFunc {
 			return
 		}
 
-		name := r.FormValue("name")
-		addr := r.FormValue("address")
-		log.Printf("Controller: Adding node - Name: %s, Address: %s", name, addr)
+		name := strings.TrimSpace(r.FormValue("name"))
+		addr := strings.TrimSpace(r.FormValue("address"))
+		log.Printf("Controller: Adding node - Name: '%s', Address: '%s'", name, addr)
 
-		if name == "" || addr == "" {
-			log.Printf("Controller: Invalid input - Name and address are required")
-			http.Error(w, "Name and address are required", http.StatusBadRequest)
+		if name == "" {
+			log.Printf("Controller: Invalid input - Name is required")
+			http.Error(w, "Node name is required", http.StatusBadRequest)
 			return
+		}
+
+		if addr == "" {
+			log.Printf("Controller: Invalid input - Address is required")
+			http.Error(w, "Node address is required", http.StatusBadRequest)
+			return
+		}
+
+		// Ensure address has http:// prefix
+		if !strings.HasPrefix(addr, "http://") && !strings.HasPrefix(addr, "https://") {
+			addr = "http://" + addr
 		}
 
 		if err := cl.AddNode(name, addr); err != nil {
@@ -386,5 +397,53 @@ func ClusterStatusHandler(cl *cluster.Cluster) http.HandlerFunc {
 			// Avoid writing http.Error here if headers are already sent.
 			// This case usually means a problem with the `response` struct itself (e.g. unsupported types for JSON).
 		}
+	}
+}
+
+// AssignNodeToPartitionRequest represents the request body for assigning a node to a partition
+type AssignNodeToPartitionRequest struct {
+	PartitionID int    `json:"partitionId"`
+	NodeID      int    `json:"nodeId"`
+	Role        string `json:"role"` // "leader" or "replica"
+}
+
+// AssignNodeToPartitionHandler handles assigning a node to a partition
+func AssignNodeToPartitionHandler(cl *cluster.Cluster) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("Controller: Received request to assign node to partition")
+
+		// Parse JSON request
+		var req AssignNodeToPartitionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("Controller: Error parsing request body: %v", err)
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		// Validate role
+		if req.Role != "leader" && req.Role != "replica" {
+			log.Printf("Controller: Invalid role specified: %s", req.Role)
+			http.Error(w, "Role must be either 'leader' or 'replica'", http.StatusBadRequest)
+			return
+		}
+
+		// Assign node based on role
+		var err error
+		if req.Role == "leader" {
+			if err = cl.ChangeLeader(req.PartitionID, req.NodeID); err != nil {
+				log.Printf("Controller: Error changing leader: %v", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else {
+			if err = cl.AddReplica(req.PartitionID, req.NodeID); err != nil {
+				log.Printf("Controller: Error adding replica: %v", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		log.Printf("Controller: Successfully assigned node %d to partition %d as %s", req.NodeID, req.PartitionID, req.Role)
+		w.WriteHeader(http.StatusOK)
 	}
 }

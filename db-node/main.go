@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -189,9 +190,36 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Forward request to leader
-		leaderURL := p.Leader + r.URL.Path
+		leaderURL := p.Leader
+		if !strings.HasPrefix(leaderURL, "http://") && !strings.HasPrefix(leaderURL, "https://") {
+			leaderURL = "http://" + leaderURL
+		}
+		leaderURL = leaderURL + r.URL.Path
 		log.Printf("DB-Node: Forwarding to leader at %s", leaderURL)
-		resp, err := http.Post(leaderURL, "application/json", bytes.NewBuffer(body))
+
+		// Copy all headers from original request
+		req, err := http.NewRequest("POST", leaderURL, bytes.NewBuffer(body))
+		if err != nil {
+			log.Printf("DB-Node: Error creating forward request: %v", err)
+			response := KeyValueResponse{
+				Success: false,
+				Error:   "Error forwarding to leader",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+
+		// Copy all headers from original request
+		for name, values := range r.Header {
+			for _, value := range values {
+				req.Header.Add(name, value)
+			}
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			log.Printf("DB-Node: Error forwarding to leader: %v", err)
 			response := KeyValueResponse{
@@ -255,7 +283,10 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGet(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	log.Printf("DB-Node: Received GET request from %s", r.RemoteAddr)
+
+	if r.Method != http.MethodGet {
+		log.Printf("DB-Node: Invalid method %s for GET operation", r.Method)
 		response := KeyValueResponse{
 			Success: false,
 			Error:   "Method not allowed",
@@ -266,37 +297,10 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read request body
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		response := KeyValueResponse{
-			Success: false,
-			Error:   "Error reading request body",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(response)
-		return
-	}
-	defer r.Body.Close()
-
-	// Parse JSON request
-	var kv struct {
-		Key string `json:"key"`
-	}
-	if err := json.Unmarshal(body, &kv); err != nil {
-		response := KeyValueResponse{
-			Success: false,
-			Error:   "Invalid JSON format",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(response)
-		return
-	}
-
-	// Validate input
-	if kv.Key == "" {
+	// Get key from query parameter
+	key := r.URL.Query().Get("key")
+	if key == "" {
+		log.Printf("DB-Node: No key provided in query parameters")
 		response := KeyValueResponse{
 			Success: false,
 			Error:   "Key is required",
@@ -307,9 +311,12 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf("DB-Node: Looking up key: %s", key)
+
 	// Get partition ID from header
 	partitionIDStr := r.Header.Get("X-Partition-ID")
 	if partitionIDStr == "" {
+		log.Printf("DB-Node: Missing X-Partition-ID header")
 		response := KeyValueResponse{
 			Success: false,
 			Error:   "Partition ID is required",
@@ -322,6 +329,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 
 	partitionID, err := strconv.Atoi(partitionIDStr)
 	if err != nil {
+		log.Printf("DB-Node: Invalid partition ID %s: %v", partitionIDStr, err)
 		response := KeyValueResponse{
 			Success: false,
 			Error:   "Invalid partition ID",
@@ -332,8 +340,11 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf("DB-Node: Processing request for partition %d", partitionID)
+
 	// Check if this node is responsible for the partition
 	if !partitionManager.HasPartition(partitionID) {
+		log.Printf("DB-Node: Node does not have partition %d", partitionID)
 		response := KeyValueResponse{
 			Success: false,
 			Error:   "Partition not found",
@@ -344,10 +355,80 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if this node is the leader for the partition
+	if !partitionManager.IsLeader(partitionID) {
+		log.Printf("DB-Node: Node is not leader for partition %d, forwarding to leader", partitionID)
+		// Forward to leader
+		p := partitionManager.GetPartition(partitionID)
+		if p == nil {
+			log.Printf("DB-Node: Failed to get partition info for %d", partitionID)
+			response := KeyValueResponse{
+				Success: false,
+				Error:   "Partition not found",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+
+		// Forward request to leader
+		leaderURL := p.Leader
+		if !strings.HasPrefix(leaderURL, "http://") && !strings.HasPrefix(leaderURL, "https://") {
+			leaderURL = "http://" + leaderURL
+		}
+		leaderURL = fmt.Sprintf("%s%s?key=%s", leaderURL, r.URL.Path, key)
+		log.Printf("DB-Node: Forwarding to leader at %s", leaderURL)
+
+		// Create new request to leader
+		req, err := http.NewRequest("GET", leaderURL, nil)
+		if err != nil {
+			log.Printf("DB-Node: Error creating forward request: %v", err)
+			response := KeyValueResponse{
+				Success: false,
+				Error:   "Error forwarding to leader",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+
+		// Copy headers from original request
+		for name, values := range r.Header {
+			for _, value := range values {
+				req.Header.Add(name, value)
+			}
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			log.Printf("DB-Node: Error forwarding to leader: %v", err)
+			response := KeyValueResponse{
+				Success: false,
+				Error:   "Error forwarding to leader",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+		defer resp.Body.Close()
+
+		log.Printf("DB-Node: Received response from leader with status %d", resp.StatusCode)
+		// Copy response from leader
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+		return
+	}
+
+	log.Printf("DB-Node: Node is leader for partition %d, retrieving value", partitionID)
 	// Get value from partition storage
 	storage := partitionManager.GetPartition(partitionID).GetStorage()
-	value, exists := storage.Get(kv.Key)
+	value, exists := storage.Get(key)
 	if !exists {
+		log.Printf("DB-Node: Key %s not found", key)
 		response := KeyValueResponse{
 			Success: false,
 			Error:   "Key not found",
@@ -358,6 +439,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf("DB-Node: Successfully retrieved value for key %s", key)
 	// Send response
 	response := KeyValueResponse{
 		Success: true,
@@ -548,6 +630,18 @@ func handlePartitionAssignment(w http.ResponseWriter, r *http.Request) {
 	log.Printf("DB-Node: Received partition assignment - ID: %d, Role: %s, Leader: %s, Replicas: %v",
 		info.ID, info.Role, info.Leader, info.Replicas)
 
+	// Ensure leader address has http:// prefix
+	if !strings.HasPrefix(info.Leader, "http://") && !strings.HasPrefix(info.Leader, "https://") {
+		info.Leader = "http://" + info.Leader
+	}
+
+	// Ensure replica addresses have http:// prefix
+	for i, replica := range info.Replicas {
+		if !strings.HasPrefix(replica, "http://") && !strings.HasPrefix(replica, "https://") {
+			info.Replicas[i] = "http://" + replica
+		}
+	}
+
 	// Add or update partition
 	partitionManager.AddPartition(
 		info.ID,
@@ -667,13 +761,27 @@ func replicateWALEntriesToNode(nodeAddress string, pID int, entries []lsm.LogEnt
 }
 
 func main() {
+	// Parse command line flags
+	portFlag := flag.Int("port", 0, "Port to run the DB node on")
+	nameFlag := flag.String("name", "", "Name of the DB node")
+	flag.Parse()
+
 	// Load configuration
 	cfg, err := config.LoadConfig("config.json")
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 	appConfig = cfg
-	selfAddress = fmt.Sprintf("%s:%d", appConfig.Host, appConfig.Port)
+
+	// Override config with command line flags if provided
+	if *portFlag != 0 {
+		appConfig.Port = *portFlag
+	}
+	if *nameFlag != "" {
+		appConfig.NodeID = *nameFlag
+	}
+
+	selfAddress = fmt.Sprintf("localhost:%d", appConfig.Port)
 	log.Printf("Node self address configured as: %s", selfAddress)
 
 	// Set up HTTP handlers
